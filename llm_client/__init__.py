@@ -3,10 +3,10 @@
 Los clientes concretos se exponen de forma perezosa (`__getattr__`) para que
 importar el paquete no exija tener los tres SDKs instalados.
 
-    from llm_client import ChatMessage, create_client
+    from llm_client import AsyncLLMManager
 
-    async with create_client("openai") as client:
-        print((await client.generate("Que es la entropia?")).content)
+    async with AsyncLLMManager("openai") as llm:      # o LLM_PROVIDER=openai
+        print((await llm.generate("Que es la entropia?")).content)
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from .exceptions import (
     UnknownProviderError,
 )
 from .factory import Provider, available_providers, create_client
+from .manager import AsyncLLMManager
 from .schemas import (
     ChatMessage,
     Conversation,
@@ -48,6 +49,7 @@ __version__ = "1.0.0"
 
 __all__ = [
     "AnthropicClient",
+    "AsyncLLMManager",
     "AuthenticationError",
     "BaseLLMClient",
     "ChatMessage",

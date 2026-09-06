@@ -6,15 +6,17 @@ token y reintentos con backoff exponencial.
 
 ```python
 import asyncio
-from llm_client import ChatMessage, create_client
+
+from llm_client import AsyncLLMManager
 
 
 async def main():
-    async with create_client("openai") as client:  # o "anthropic" / "gemini"
-        r = await client.generate("¿Qué es la entropía?")
+    # El proveedor sale del argumento o de la variable LLM_PROVIDER.
+    async with AsyncLLMManager("openai") as llm:  # o "anthropic" / "gemini"
+        r = await llm.generate("¿Qué es la entropía?")
         print(r.content, r.usage.total_tokens)
 
-        async for token in client.stream_text("Contame un chiste corto"):
+        async for token in llm.stream_text("Contame un chiste corto"):
             print(token, end="", flush=True)
 
 
@@ -31,9 +33,10 @@ asyncio.run(main())
 | [llm_client/providers/openai_client.py](llm_client/providers/openai_client.py) | `AsyncOpenAI` -> Chat Completions |
 | [llm_client/providers/anthropic_client.py](llm_client/providers/anthropic_client.py) | `AsyncAnthropic` -> Messages API |
 | [llm_client/providers/gemini_client.py](llm_client/providers/gemini_client.py) | `google-genai` -> `client.aio` |
+| [llm_client/manager.py](llm_client/manager.py) | `AsyncLLMManager`: elige proveedor por argumento o por `LLM_PROVIDER` |
 | [llm_client/factory.py](llm_client/factory.py) | `create_client("openai")`, `available_providers()` |
 | [main.py](main.py) | Script de validación contra las APIs reales |
-| [validate_offline.py](validate_offline.py) | 33 verificaciones sin red, sin keys y sin SDKs |
+| [validate_offline.py](validate_offline.py) | 39 verificaciones sin red, sin keys y sin SDKs |
 
 ## Instalación
 
@@ -58,6 +61,31 @@ venv: `.venv\Scripts\python.exe validate_offline.py`.
 
 Los SDKs se importan a demanda: si solo se va a usar Anthropic, alcanza con
 `pip install pydantic python-dotenv anthropic`.
+
+El proyecto declara `requires-python = ">=3.12"`. Si tenés varias versiones instaladas
+y querés fijar el intérprete, creá el entorno con la que corresponda:
+
+```powershell
+py -3.12 -m venv .venv     # py -0 lista las versiones disponibles
+```
+
+## Variables de entorno
+
+Se leen del `.env` del directorio actual (vía `python-dotenv`) o del entorno del
+sistema. Ninguna es obligatoria en conjunto: alcanza con la key del proveedor que
+se vaya a usar.
+
+| Variable | Obligatoria | Para qué |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | solo para OpenAI | Credencial de OpenAI |
+| `ANTHROPIC_API_KEY` | solo para Anthropic | Credencial de Anthropic |
+| `GEMINI_API_KEY` | solo para Gemini | Credencial de Gemini (tiene prioridad) |
+| `GOOGLE_API_KEY` | no | Alternativa a la anterior, si ya la tenés definida |
+| `LLM_PROVIDER` | no | Proveedor que usa `AsyncLLMManager()` cuando se lo construye sin argumentos: `openai`, `anthropic` o `gemini` |
+| `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` | no | Redirigir a un proxy o a un servidor de prueba local |
+
+La API key también se puede pasar por código (`AsyncLLMManager("openai", api_key=...)`),
+que es lo que hace la demo de errores de `main.py` para forzar un fallo controlado.
 
 ## Uso
 
@@ -159,6 +187,7 @@ suele indicar el reemplazo, y siempre se puede consultar qué habilita la key:
 
 ```python
 from google import genai
+
 for m in genai.Client().models.list():
     if "generateContent" in (m.supported_actions or []):
         print(m.name)
@@ -179,9 +208,10 @@ create_client("openai", extra={"seed": 42, "presence_penalty": 0.5})
 ## Verificación
 
 `validate_offline.py` implementa un proveedor falso sobre `BaseLLMClient` y verifica
-33 comportamientos sin tocar la red: validaciones de Pydantic, normalización de
+39 comportamientos sin tocar la red: validaciones de Pydantic, normalización de
 mensajes, streaming, reintentos (429 que sale bien al tercer intento, 429 persistente,
-401 sin reintento), errores como dato y concurrencia real.
+401 sin reintento), errores como dato, concurrencia real y la elección de proveedor
+de `AsyncLLMManager`.
 
 ```
 $ python validate_offline.py

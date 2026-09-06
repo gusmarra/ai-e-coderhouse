@@ -10,6 +10,7 @@ reintentos con backoff y errores devueltos como dato.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
@@ -272,6 +273,50 @@ async def test_concurrencia() -> None:
     )
 
 
+def test_manager() -> None:
+    print("\n6. AsyncLLMManager (eleccion de proveedor por configuracion)")
+    from llm_client import AsyncLLMManager
+    from llm_client.exceptions import (
+        ConfigurationError,
+        ProviderNotInstalledError,
+        UnknownProviderError,
+    )
+
+    previo_prov = os.environ.pop("LLM_PROVIDER", None)
+    tenia_key = "OPENAI_API_KEY" in os.environ
+    try:
+        try:
+            AsyncLLMManager()
+            check(False, "sin proveedor ni LLM_PROVIDER deberia fallar")
+        except ConfigurationError:
+            check(True, "sin proveedor ni LLM_PROVIDER falla con mensaje claro")
+
+        try:
+            AsyncLLMManager("no-existe")
+            check(False, "un proveedor inexistente deberia fallar")
+        except UnknownProviderError:
+            check(True, "proveedor inexistente -> UnknownProviderError")
+
+        os.environ["LLM_PROVIDER"] = "openai"
+        os.environ.setdefault("OPENAI_API_KEY", "clave-de-prueba-offline")
+        try:
+            manager = AsyncLLMManager()  # sin argumentos: lee la variable
+            check(manager.provider == "openai", "LLM_PROVIDER=openai carga el cliente de OpenAI")
+            metodos = ("generate", "generate_safe", "stream", "stream_text")
+            check(
+                all(hasattr(manager, m) for m in metodos),
+                "expone generate / generate_safe / stream / stream_text",
+            )
+        except ProviderNotInstalledError:
+            print("  skip  SDK de OpenAI no instalado: no se probo la carga por variable")
+    finally:
+        os.environ.pop("LLM_PROVIDER", None)
+        if previo_prov is not None:
+            os.environ["LLM_PROVIDER"] = previo_prov
+        if not tenia_key:
+            os.environ.pop("OPENAI_API_KEY", None)
+
+
 async def main() -> int:
     print("Validacion offline (no usa red ni API keys)")
     test_schemas()
@@ -279,6 +324,7 @@ async def main() -> int:
     await test_streaming()
     await test_reintentos()
     await test_concurrencia()
+    test_manager()
 
     print(f"\n{'-' * 60}")
     if fallas:

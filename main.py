@@ -25,6 +25,7 @@ import time
 from dotenv import load_dotenv
 
 from llm_client import (
+    AsyncLLMManager,
     ChatMessage,
     ErrorResponse,
     LLMError,
@@ -32,7 +33,6 @@ from llm_client import (
     Provider,
     RetryConfig,
     available_providers,
-    create_client,
 )
 
 PREGUNTA = "Que es la entropia? Responde en dos oraciones."
@@ -67,7 +67,7 @@ async def demo_normal(proveedor: Provider) -> None:
     titulo(f"[{proveedor}] modo normal (await generate)")
     mensajes = [ChatMessage.system(SISTEMA), ChatMessage.user(PREGUNTA)]
 
-    async with create_client(proveedor, temperature=0.3, max_tokens=MAX_TOKENS) as client:
+    async with AsyncLLMManager(proveedor, temperature=0.3, max_tokens=MAX_TOKENS) as client:
         respuesta = await client.generate(mensajes)
 
     print(respuesta.content)
@@ -90,7 +90,7 @@ async def demo_streaming(proveedor: Provider) -> None:
     primer_token_ms: float | None = None
     tokens = 0
 
-    async with create_client(proveedor, temperature=0.3, max_tokens=MAX_TOKENS) as client:
+    async with AsyncLLMManager(proveedor, temperature=0.3, max_tokens=MAX_TOKENS) as client:
         # `stream()` devuelve StreamChunk (con usage al final);
         # `stream_text()` es el atajo que solo emite el texto.
         async for chunk in client.stream(mensajes):
@@ -120,7 +120,7 @@ async def demo_errores(proveedor: Provider) -> None:
     )
 
     # Un solo intento: una key invalida no es transitoria, reintentar no sirve.
-    async with create_client(
+    async with AsyncLLMManager(
         proveedor,
         api_key="sk-clave-invalida-a-proposito",
         retry=RetryConfig(max_attempts=1),
@@ -159,7 +159,7 @@ async def demo_concurrencia(proveedor: Provider) -> None:
     ]
 
     inicio = time.perf_counter()
-    async with create_client(proveedor, temperature=0.0, max_tokens=MAX_TOKENS) as client:
+    async with AsyncLLMManager(proveedor, temperature=0.0, max_tokens=MAX_TOKENS) as client:
         # generate_safe + gather: si una falla, las otras dos igual llegan.
         resultados = await asyncio.gather(*(client.generate_safe(p) for p in preguntas))
     transcurrido = (time.perf_counter() - inicio) * 1000
