@@ -1,25 +1,19 @@
 [project]
-name = "llm-client"
+name = "pipeline-extraccion-tecnica"
 version = "1.0.0"
-description = "Cliente LLM asincrono, multi-proveedor y validado con Pydantic"
+description = "Pipeline LCEL de extraccion de entidades tecnicas con salida validada por Pydantic"
 requires-python = ">=3.12"
 dependencies = [
+    "langchain-core>=0.3.60",
     "pydantic>=2.9,<3",
     "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-openai = ["openai>=1.60"]
-anthropic = ["anthropic>=0.40"]
-gemini = ["google-genai>=1.0"]
-all = ["openai>=1.60", "anthropic>=0.40", "google-genai>=1.0"]
-
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-include = ["llm_client*"]
+openai = ["langchain-openai>=0.3"]
+anthropic = ["langchain-anthropic>=0.3"]
+gemini = ["langchain-google-genai>=2.1"]
+all = ["langchain-openai>=0.3", "langchain-anthropic>=0.3", "langchain-google-genai>=2.1"]
 
 [tool.ruff]
 line-length = 100

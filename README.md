@@ -1,52 +1,63 @@
-# Cliente de LLM robusto y asíncrono (Python 3.12+)
+# Pipeline de extracción de entidades técnicas (LCEL + Pydantic)
 
-Un cliente único, `async`, para **OpenAI**, **Anthropic** y **Gemini** detrás de la
-misma interfaz, con entrada y salida validadas por **Pydantic**, streaming token a
-token y reintentos con backoff exponencial.
+Recibe un párrafo de texto sin procesar —un log de error, una descripción de
+arquitectura— y devuelve un objeto **validado**, no un string con JSON adentro.
 
 ```python
 import asyncio
+from chain import process_text
 
-from llm_client import AsyncLLMManager
-
-
-async def main():
-    # El proveedor sale del argumento o de la variable LLM_PROVIDER.
-    async with AsyncLLMManager("openai") as llm:  # o "anthropic" / "gemini"
-        r = await llm.generate("¿Qué es la entropía?")
-        print(r.content, r.usage.total_tokens)
-
-        async for token in llm.stream_text("Contame un chiste corto"):
-            print(token, end="", flush=True)
-
-
-asyncio.run(main())
+resultado = asyncio.run(process_text(
+    "504 Gateway Timeout en POST /v1/orders: el pool de PostgreSQL quedó "
+    "saturado porque el caché de Redis se invalidó entero tras el deploy y "
+    "todas las requests de FastAPI fueron a la base."
+))
+print(resultado.model_dump_json(indent=2))
 ```
+
+```json
+{
+  "tecnologias": ["PostgreSQL", "Redis", "FastAPI"],
+  "nivel_de_criticidad": "alta",
+  "resumen_tecnico": "El pool de conexiones de PostgreSQL se saturó tras invalidarse el caché de Redis, lo que derivó todas las requests de FastAPI a la base y provocó timeouts."
+}
+```
+
+`resultado` es una instancia de `ExtraccionTecnica`: si el modelo hubiera
+devuelto una lista vacía, un nivel inventado o un JSON cortado a la mitad, la
+cadena lo habría detectado y reintentado antes de llegar a esta línea.
+
+## La cadena, en una expresión
+
+```python
+PROMPT | modelo.with_structured_output(ExtraccionTecnica, include_raw=True) | _validar
+#                                                                      └─ .with_retry(...)
+```
+
+| Eslabón | Qué aporta |
+| --- | --- |
+| `PROMPT` | `ChatPromptTemplate` con dos variables (`texto`, `instrucciones_formato`). Sin f-strings: las variables las gestiona LangChain. |
+| `with_structured_output(..., include_raw=True)` | El esquema Pydantic viaja como definición de herramienta; el modelo responde con JSON tipado. |
+| `_validar` | Mira el `finish_reason`, el `parsing_error` y el objeto parseado, y traduce cada falla a una excepción propia. |
+| `.with_retry(...)` | Vuelve a llamar al modelo **solo** ante esas excepciones, con backoff exponencial y jitter. |
 
 ## Estructura
 
 | Archivo | Rol |
 | --- | --- |
-| [llm_client/schemas.py](llm_client/schemas.py) | `ChatMessage`, `Conversation`, `ModelConfig`, `RetryConfig`, `ModelResponse`, `StreamChunk`, `Usage`, `ErrorResponse` |
-| [llm_client/exceptions.py](llm_client/exceptions.py) | Jerarquía de errores propia, con el flag `retryable` |
-| [llm_client/base.py](llm_client/base.py) | `BaseLLMClient`: ABC + reintentos + medición + context manager |
-| [llm_client/providers/openai_client.py](llm_client/providers/openai_client.py) | `AsyncOpenAI` -> Chat Completions |
-| [llm_client/providers/anthropic_client.py](llm_client/providers/anthropic_client.py) | `AsyncAnthropic` -> Messages API |
-| [llm_client/providers/gemini_client.py](llm_client/providers/gemini_client.py) | `google-genai` -> `client.aio` |
-| [llm_client/manager.py](llm_client/manager.py) | `AsyncLLMManager`: elige proveedor por argumento o por `LLM_PROVIDER` |
-| [llm_client/factory.py](llm_client/factory.py) | `create_client("openai")`, `available_providers()` |
-| [main.py](main.py) | Script de validación contra las APIs reales |
-| [validate_offline.py](validate_offline.py) | 39 verificaciones sin red, sin keys y sin SDKs |
+| [schemas.py](schemas.py) | `ExtraccionTecnica` y `NivelDeCriticidad`: el contrato de salida y sus restricciones |
+| [chain.py](chain.py) | Prompt, factory de modelos, validación, reintentos, `process_text()` y `process_batch()` |
+| [main.py](main.py) | Mini script de prueba asíncrono contra la API real (4 demos) |
+| [validate_offline.py](validate_offline.py) | 36 verificaciones sin red, sin API keys y sin SDKs |
 
 ## Instalación
 
 ```powershell
 # Windows / PowerShell
 python -m venv .venv
-.venv\Scripts\Activate.ps1      # si PowerShell lo bloquea:
-                                 # Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env           # y completar las keys que se vayan a usar
+copy .env.example .env           # y completar la key del proveedor a usar
 ```
 
 ```bash
@@ -56,169 +67,140 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Sin activar el entorno, los scripts se pueden correr apuntando al interprete del
-venv: `.venv\Scripts\python.exe validate_offline.py`.
-
-Los SDKs se importan a demanda: si solo se va a usar Anthropic, alcanza con
-`pip install pydantic python-dotenv anthropic`.
-
-El proyecto declara `requires-python = ">=3.12"`. Si tenés varias versiones instaladas
-y querés fijar el intérprete, creá el entorno con la que corresponda:
-
-```powershell
-py -3.12 -m venv .venv     # py -0 lista las versiones disponibles
-```
-
-## Variables de entorno
-
-Se leen del `.env` del directorio actual (vía `python-dotenv`) o del entorno del
-sistema. Ninguna es obligatoria en conjunto: alcanza con la key del proveedor que
-se vaya a usar.
-
-| Variable | Obligatoria | Para qué |
-| --- | --- | --- |
-| `OPENAI_API_KEY` | solo para OpenAI | Credencial de OpenAI |
-| `ANTHROPIC_API_KEY` | solo para Anthropic | Credencial de Anthropic |
-| `GEMINI_API_KEY` | solo para Gemini | Credencial de Gemini (tiene prioridad) |
-| `GOOGLE_API_KEY` | no | Alternativa a la anterior, si ya la tenés definida |
-| `LLM_PROVIDER` | no | Proveedor que usa `AsyncLLMManager()` cuando se lo construye sin argumentos: `openai`, `anthropic` o `gemini` |
-| `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` | no | Redirigir a un proxy o a un servidor de prueba local |
-
-La API key también se puede pasar por código (`AsyncLLMManager("openai", api_key=...)`),
-que es lo que hace la demo de errores de `main.py` para forzar un fallo controlado.
-
-## Uso
-
 ```bash
-python validate_offline.py          # no necesita keys ni red
-python main.py                      # prueba todos los proveedores con key en .env
-python main.py anthropic gemini     # solo esos
+python validate_offline.py     # no necesita API key ni red
+python main.py                 # las 4 demos contra la API (~10 llamadas)
+python main.py anthropic       # fuerza un proveedor
+python main.py gemini 1 2      # solo las demos 1 y 2
 ```
 
-`main.py` corre, por proveedor: modo normal, streaming, manejo de errores con una
-key inválida y tres llamadas en paralelo con `asyncio.gather`.
-
-## Diseño
-
-**1. Un contrato de datos, tres APIs.** Cada proveedor traduce su respuesta a
-`ModelResponse`, así la aplicación nunca navega diccionarios anidados
-(`resp["choices"][0]["message"]["content"]`). El payload crudo sigue accesible en
-`.raw` para debug, pero está excluido de los dumps.
-
-**2. La clase base concentra lo transversal.** Un proveedor nuevo implementa tres
-métodos privados y hereda gratis validación, reintentos, latencia, `attempts` y
-cierre del cliente HTTP:
+## El contrato (`schemas.py`)
 
 ```python
-class MiProveedor(BaseLLMClient):
-    provider_name = "mi-proveedor"
-    default_model = "mi-modelo"
-    api_key_env = "MI_API_KEY"
+class ExtraccionTecnica(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    async def _agenerate(self, conversation, config) -> ModelResponse: ...
-    async def _astream(self, conversation, config) -> AsyncIterator[StreamChunk]: ...
-    def _translate_error(self, exc) -> LLMError | None: ...
+    tecnologias: list[str] = Field(min_length=1, max_length=25, description=...)
+    nivel_de_criticidad: NivelDeCriticidad          # enum: baja | media | alta
+    resumen_tecnico: str = Field(min_length=20, max_length=400, description=...)
 ```
 
-**3. Dos estilos de error, según el llamador.**
+El esquema hace dos trabajos a la vez, y por eso vale la pena escribirlo con
+cuidado: cada `description=` termina dentro del prompt (es lo que
+`with_structured_output()` le manda al modelo como definición de herramienta), y
+las restricciones son el control de calidad de lo que vuelve.
+
+Las restricciones son deliberadamente estrictas —un reintento es más barato que
+un objeto vacío que rompe río abajo:
+
+- `tecnologias` no puede estar vacía; se normalizan espacios y se deduplica sin
+  distinguir mayúsculas (`["Redis", "redis "]` → `["Redis"]`).
+- `nivel_de_criticidad` es un `StrEnum`: el modelo no puede inventar "crítica".
+- `resumen_tecnico` tiene que **mencionar al menos una de las tecnologías
+  extraídas** (validación cruzada con `@model_validator`). Es lo que atrapa la
+  respuesta perezosa: lista correcta + resumen genérico del estilo "el sistema
+  presenta problemas".
+- `extra="forbid"`: un campo de más también dispara el reintento.
+
+## La resiliencia (`chain.py`)
+
+El pipeline distingue tres formas de fallar, y las tres reintentan:
+
+| Situación | Excepción | Cómo se detecta |
+| --- | --- | --- |
+| El modelo se quedó sin tokens y cortó el JSON | `RespuestaTruncadaError` | `finish_reason` / `stop_reason` del mensaje crudo |
+| El JSON llegó entero pero no cumple el contrato | `ExtraccionIncompletaError` | el `parsing_error` que devuelve `include_raw=True` |
+| El modelo contestó en prosa y nunca llamó a la herramienta | `RespuestaVaciaError` | `parsed is None` |
 
 ```python
-r = await client.generate(msgs)  # lanza LLMError al agotar reintentos
-r = await client.generate_safe(msgs)  # devuelve ModelResponse | ErrorResponse
+(estructurado | RunnableLambda(_validar)).with_retry(
+    retry_if_exception_type=(SalidaNoValidaError, ValidationError),
+    stop_after_attempt=3,
+    wait_exponential_jitter=True,
+)
 ```
 
-`generate_safe()` es lo que hace que un `asyncio.gather` de 50 preguntas no se
-caiga entera porque una devolvió 429.
+Solo se reintenta eso. Un 401 o un modelo inexistente se propagan tal cual: no
+tiene sentido reintentar tres veces algo que no va a cambiar, y los 429 y los
+errores de red ya los reintenta el SDK del proveedor.
 
-**4. Streaming con totales al final.** `stream()` emite `StreamChunk`; el último
-llega con `is_final=True` y el `usage` real. `stream_text()` es el atajo que emite
-solo texto, y `collect_stream()` consume el stream y devuelve una `ModelResponse`.
+### Por qué `include_raw=True`
 
-**5. Reintentos donde tienen sentido.** Solo se reintenta lo transitorio (429, 5xx,
-red, timeout) con backoff exponencial + jitter, respetando el header `retry-after`.
-Un 401 o un 400 fallan al primer intento. En streaming se reintenta **solo antes del
-primer token**: después ya se emitió texto y repetir la llamada lo duplicaría.
+Es la parte que se suele saltear. Sin él, un JSON cortado a la mitad llega como
+una excepción de parseo opaca (`Unterminated string...`) y el mensaje original
+se pierde. Con él, la cadena recibe `{"raw", "parsed", "parsing_error"}` y puede
+mirar el `finish_reason` **antes** de confiar en el objeto:
 
-**6. Normalización de mensajes.** `Conversation` acepta un string, un dict, un
-`ChatMessage` o una lista mezclada, extrae el prompt de sistema aparte (Anthropic y
-Gemini lo reciben en su propio parámetro) y fusiona mensajes consecutivos del mismo
-rol (la Messages API espera roles alternados).
+```
+WARNING  clase_2.chain: respuesta cortada por el proveedor (finish_reason=max_tokens): reintento
+```
 
-## Errores comunes que este código evita
+Cada proveedor lo nombra distinto —OpenAI y Gemini usan `finish_reason`,
+Anthropic usa `stop_reason`—, así que `_motivo_de_corte()` normaliza los tres.
+La demo 4 de `main.py` lo fuerza con `max_tokens=16`.
 
-| Error | Cómo se evita |
+## Proveedores
+
+`crear_modelo()` replica el factory del Módulo 1 (`llm_client/factory.py` de la
+entrega anterior) sobre los chat models de LangChain: mismo nombre de variable
+(`LLM_PROVIDER`), mismos nombres de proveedor y el mismo import perezoso, así
+que usar Gemini no obliga a instalar los otros dos SDKs.
+
+| `LLM_PROVIDER` | Clase | Modelo por defecto |
+| --- | --- | --- |
+| `openai` | `ChatOpenAI` | `gpt-4.1-mini` |
+| `anthropic` | `ChatAnthropic` | `claude-sonnet-5` |
+| `gemini` (alias `google`) | `ChatGoogleGenerativeAI` | `gemini-3.6-flash` |
+
+Sin `LLM_PROVIDER`, se usa el primero que tenga API key en el entorno.
+`LLM_MODEL` pisa el modelo por defecto.
+
+`temperature=0`: esto es extracción, no redacción; para el mismo texto queremos
+la misma salida.
+
+## Dos cosas que aparecieron probando contra la API real
+
+**`max_tokens=1024` no alcanza.** Suena generoso para un JSON de tres campos,
+pero los modelos actuales razonan antes de responder y ese razonamiento sale del
+mismo presupuesto: con `gemini-3.6-flash` cada extracción consumió entre 550 y
+900 tokens de salida. Con 1024, el truncado dejaba de ser un caso de borde y
+pasaba a ser el caso normal. El default quedó en `MAX_TOKENS = 2048`.
+
+**La validación no atrapa la alucinación.** En la prueba de estrés (demo 2) se
+le pasa un texto sin ninguna tecnología. Lo esperable es que `min_length=1`
+rechace la lista vacía y se agoten los reintentos; lo que a veces pasa es que el
+modelo, presionado por el contrato, devuelve `{"tecnologias": ["Panaderia"]}`.
+El JSON es válido y el pipeline lo acepta. El límite es real y conviene tenerlo
+presente: Pydantic verifica la **forma**, no la **verdad**. Eso se ataca en el
+prompt, o agregando al esquema un campo de confianza o un booleano
+`contiene_tecnologias` que el modelo pueda poner en `false` sin sentir que
+incumple.
+
+## Validación offline
+
+`validate_offline.py` reemplaza la única pieza que necesita red —la capa
+`with_structured_output`— por un runnable falso que devuelve exactamente la
+misma forma. Eso permite testear de forma determinista lo que contra la API real
+sería un volado: cuántas veces reintenta, ante qué excepciones, y qué pasa
+cuando el segundo intento sale bien.
+
+```
+1. Esquema Pydantic (schemas.py)                        10 checks
+2. Prompt template (ChatPromptTemplate, sin f-strings)   6 checks
+3. Validacion de la salida y reintentos (.with_retry)   14 checks
+4. process_text / process_batch                          6 checks
+
+Todas las verificaciones pasaron.
+```
+
+## Checklist de la entrega
+
+| Requisito | Dónde |
 | --- | --- |
-| Bloquear el event loop con el cliente síncrono | Solo `AsyncOpenAI`, `AsyncAnthropic` y `client.aio` de Gemini; `validate_offline.py` mide 10 llamadas concurrentes para probarlo |
-| Que una excepción del SDK rompa el loop principal | Toda excepción nativa se traduce a `LLMError`; `generate_safe()` la devuelve como dato |
-| Reintentar lo que nunca va a funcionar | El flag `retryable` distingue 429/5xx de 401/400 |
-| Reintentos duplicados e invisibles | Los SDKs se construyen con `max_retries=0`: los reintentos son los del cliente y se ven en `attempts` |
-| Un `temperature=9` que se descubre como 400 tras el round trip | `ModelConfig` valida rangos antes de salir a la red, también en los overrides por llamada |
-| Diccionarios anidados por toda la app | `ModelResponse` / `StreamChunk` con tipos |
-| Perder el `usage` cuando se usa streaming | OpenAI recibe `stream_options={"include_usage": True}` y Anthropic usa `get_final_message()` |
-| Fugas de conexiones HTTP | `async with` sobre el cliente (`aclose()` cierra el cliente del SDK) |
-| Cancelaciones tragadas | `asyncio.CancelledError` nunca se captura como error de API |
-
-## Notas por proveedor
-
-**Anthropic.** Los modelos actuales (familia Claude 5 / 4.6+) **ya no aceptan
-`temperature` ni `top_p`**: la Messages API los rechaza. El cliente los ignora con un
-warning en lugar de romper la llamada; la profundidad de razonamiento se controla con
-`output_config`:
-
-```python
-create_client("anthropic", extra={"output_config": {"effort": "low"}})
-```
-
-Además estos modelos razonan por defecto y ese razonamiento consume `max_tokens`: con
-un techo muy bajo la respuesta puede volver vacía. Por eso `main.py` pide holgura
-(`max_tokens=2000`) aunque la respuesta sea de dos oraciones.
-
-**OpenAI.** Se envía `max_completion_tokens` (el `max_tokens` de Chat Completions está
-deprecado) y `stream_options={"include_usage": True}` para recibir tokens en streaming.
-
-**Gemini.** El rol `assistant` se mapea a `model`, el prompt de sistema va en
-`system_instruction`, el timeout del SDK está en milisegundos y la key se busca en
-`GEMINI_API_KEY` o `GOOGLE_API_KEY`. Una key inválida llega como `400 API_KEY_INVALID`
-(no como 401), y el cliente la reclasifica igual a `AuthenticationError`.
-
-**Modelos por defecto.** `gpt-4.1-mini`, `claude-opus-5` y `gemini-3.6-flash`. Google
-retira versiones seguido: si aparece un `404 ... no longer available`, el mensaje
-suele indicar el reemplazo, y siempre se puede consultar qué habilita la key:
-
-```python
-from google import genai
-
-for m in genai.Client().models.list():
-    if "generateContent" in (m.supported_actions or []):
-        print(m.name)
-```
-
-Para cambiar el modelo sin tocar el código del cliente:
-
-```python
-create_client("gemini", model="gemini-3.8-flash")
-```
-
-Cualquier parámetro propio de un proveedor se pasa por `extra`, que va tal cual al SDK:
-
-```python
-create_client("openai", extra={"seed": 42, "presence_penalty": 0.5})
-```
-
-## Verificación
-
-`validate_offline.py` implementa un proveedor falso sobre `BaseLLMClient` y verifica
-39 comportamientos sin tocar la red: validaciones de Pydantic, normalización de
-mensajes, streaming, reintentos (429 que sale bien al tercer intento, 429 persistente,
-401 sin reintento), errores como dato, concurrencia real y la elección de proveedor
-de `AsyncLLMManager`.
-
-```
-$ python validate_offline.py
-...
-todas las verificaciones pasaron
-```
-
-Los tres clientes se validaron además de punta a punta contra un servidor HTTP local
-que emula las tres APIs (payload enviado, SSE de streaming, `usage`, y clasificación
-de 401 / 429 / 500).
+| Esquema Pydantic con `tecnologias`, `nivel_de_criticidad` (enum) y `resumen_tecnico` | [schemas.py](schemas.py) |
+| Prompt template modular que acepta el texto y las instrucciones de formato | `PROMPT` en [chain.py](chain.py) |
+| Cadena LCEL `prompt \| model.with_structured_output(Schema)` | `construir_cadena()` en [chain.py](chain.py) |
+| Reintento ante JSON mal formado o incompleto (`.with_retry()`) | `con_resiliencia()` en [chain.py](chain.py) |
+| Detección de `finish_reason` antes de transformar el objeto | `_validar()` / `_motivo_de_corte()` en [chain.py](chain.py) |
+| `async def process_text(text)` con `.ainvoke()` y logs de validación | [chain.py](chain.py) |
+| Mini script de prueba asíncrono | [main.py](main.py) y [validate_offline.py](validate_offline.py) |
