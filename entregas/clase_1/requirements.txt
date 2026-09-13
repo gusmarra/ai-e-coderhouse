@@ -1,0 +1,8 @@
+pydantic>=2.9,<3
+python-dotenv>=1.0
+
+# SDKs oficiales, en su variante asincrona.
+# El paquete los importa a demanda: se puede borrar el que no se use.
+openai>=1.60
+anthropic>=0.40
+google-genai>=1.0

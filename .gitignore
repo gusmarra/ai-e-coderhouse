@@ -6,4 +6,4 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 # Entregas anteriores: viven en el repo pero fuera de esta entrega.
-entregas/
+
