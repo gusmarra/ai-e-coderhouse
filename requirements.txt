@@ -1,10 +1,14 @@
-# Nucleo del pipeline: Runnables, ChatPromptTemplate y with_structured_output.
+# Nucleo de la cadena RAG: Runnables, ChatPromptTemplate, PydanticOutputParser.
 langchain-core>=0.3.60
 pydantic>=2.9,<3
 python-dotenv>=1.0
 
-# Integraciones. Alcanza con instalar la del proveedor que se vaya a usar:
-# chain.py las importa a demanda.
+# Chunking y base vectorial.
+langchain-text-splitters>=0.3
+langchain-chroma>=0.2
+chromadb>=0.5
+
+# Integraciones de modelo (chat + embeddings). Alcanza con instalar la del
+# proveedor que se vaya a usar: llm.py las importa a demanda.
 langchain-openai>=0.3
-langchain-anthropic>=0.3
 langchain-google-genai>=2.1

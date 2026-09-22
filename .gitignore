@@ -5,5 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+# ChromaDB persistido: se reconstruye con `python ingest.py` (ver README).
+vectorstore/
 # Entregas anteriores: viven en el repo pero fuera de esta entrega.
 

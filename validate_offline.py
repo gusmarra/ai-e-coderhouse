@@ -1,14 +1,25 @@
-"""Validacion del pipeline sin red, sin API keys y sin SDKs de proveedores.
+"""Validacion del pipeline RAG sin red, sin API keys y sin llamar a ChromaDB
+ni a un proveedor real.
 
-Reemplaza la capa `model.with_structured_output(..., include_raw=True)` por un
-runnable falso que devuelve exactamente la misma forma
-(`{"raw", "parsed", "parsing_error"}`). Eso permite probar lo que realmente
-importa y no se puede testear contra la API real de forma determinista:
+Reemplaza cada pieza que hable con el exterior por un doble de prueba:
 
-* las restricciones del esquema Pydantic,
-* la deteccion de `finish_reason` truncado,
-* cuantas veces reintenta `.with_retry()` y ante que excepciones,
-* la recuperacion cuando el segundo intento sale bien.
+* el chat model -> `FakeListChatModel` (parte de `langchain_core`), que
+  devuelve texto fijo sin hacer ninguna llamada HTTP,
+* el retriever -> un `RunnableLambda` que devuelve `Document`s fijos en vez
+  de consultar ChromaDB.
+
+Eso permite probar lo que realmente importa y no se puede testear contra la
+API real de forma determinista ni gratis:
+
+* el chunking (tamano y overlap de los fragmentos),
+* las restricciones de los esquemas Pydantic (`RespuestaModelo`, `Referencia`,
+  `RespuestaRAG`),
+* que el prompt lleve las instrucciones de formato del parser,
+* que `_armar_referencias` arme las citas desde los metadatos del retriever
+  (y no desde lo que diga el LLM),
+* la cadena LCEL completa (`PROMPT | modelo_falso | parser`) parseando un
+  JSON valido de punta a punta,
+* que `get_rag_response` orqueste retriever + generacion y valide la entrada.
 
     python validate_offline.py
 """
@@ -16,33 +27,27 @@ importa y no se puede testear contra la API real de forma determinista:
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
-from typing import Any
 
-from langchain_core.messages import AIMessage
-from langchain_core.runnables import Runnable, RunnableLambda
+from langchain_core.documents import Document
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.runnables import RunnableLambda
 from pydantic import ValidationError
 
 from chain import (
+    HUMANO,
     PROMPT,
-    ExtraccionIncompletaError,
-    RespuestaTruncadaError,
-    RespuestaVaciaError,
-    SalidaNoValidaError,
-    con_resiliencia,
-    process_batch,
-    process_text,
+    SISTEMA,
+    _armar_referencias,
+    _formatear_contexto,
+    construir_generacion,
+    get_rag_response,
 )
-from schemas import ExtraccionTecnica, NivelDeCriticidad
+from ingest import CHUNK_OVERLAP, CHUNK_SIZE, _cargar_documentos, _fragmentar
+from schemas import MENSAJE_SIN_CONTEXTO, Referencia, RespuestaModelo, RespuestaRAG
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-# Los WARNING que salen durante la corrida son parte de lo que se esta
-# probando: cada uno es un reintento que el pipeline decidio hacer. Van a
-# stderr, asi que `python validate_offline.py 2>/dev/null` deja solo los checks.
-logging.basicConfig(level=logging.WARNING, format="%(levelname)-8s %(name)s: %(message)s")
 
 fallas: list[str] = []
 
@@ -57,279 +62,170 @@ def titulo(texto: str) -> None:
     print(f"\n{texto}")
 
 
-VALIDO = {
-    "tecnologias": ["FastAPI", "Redis", "PostgreSQL"],
-    "nivel_de_criticidad": "alta",
-    "resumen_tecnico": (
-        "API con cache en Redis y persistencia en PostgreSQL; "
-        "cuello de botella en conexiones concurrentes."
-    ),
-}
+# ----------------------------------------------------------------------
+# 1. Chunking (ingest.py) sobre los documentos reales de data/
+# ----------------------------------------------------------------------
+def probar_chunking() -> None:
+    titulo("1. Chunking de data/*.md")
+
+    documentos = _cargar_documentos()
+    check(len(documentos) >= 3, f"hay al menos 3 documentos fuente (encontrados: {len(documentos)})")
+    check(
+        len({d.metadata["source"] for d in documentos}) == len(documentos),
+        "cada documento tiene un 'source' distinto en metadata",
+    )
+
+    chunks = _fragmentar(documentos)
+    check(len(chunks) > len(documentos), f"la fragmentacion genero mas de un chunk por documento ({len(chunks)} chunks)")
+
+    # Margen sobre CHUNK_SIZE: el splitter recursivo puede pasarse un poco
+    # cuando un separador (p.ej. una fila de tabla larga) no admite un corte
+    # mas fino; lo que no debe pasar es que un chunk sea varias veces el
+    # tamano pedido.
+    sobredimensionados = [c for c in chunks if len(c.page_content) > CHUNK_SIZE * 1.5]
+    check(not sobredimensionados, f"ningun chunk supera 1.5x el chunk_size ({CHUNK_SIZE} caracteres)")
+    check(CHUNK_OVERLAP > 0, "el overlap configurado es mayor a cero")
+    check(
+        all(c.metadata.get("source") for c in chunks),
+        "todos los chunks conservan el 'source' del documento original",
+    )
+
+    fuentes_en_chunks = {c.metadata["source"] for c in chunks}
+    fuentes_originales = {d.metadata["source"] for d in documentos}
+    check(fuentes_en_chunks == fuentes_originales, "no se perdio ningun documento al fragmentar")
 
 
 # ----------------------------------------------------------------------
-# Dobles de prueba
+# 2. Esquemas Pydantic (schemas.py)
 # ----------------------------------------------------------------------
-def salida_ok(**overrides: Any) -> dict[str, Any]:
-    """Lo que devuelve `with_structured_output(include_raw=True)` cuando todo va bien."""
-    return {
-        "raw": AIMessage(
-            content="",
-            response_metadata={"finish_reason": "stop"},
-            usage_metadata={"input_tokens": 120, "output_tokens": 48, "total_tokens": 168},
-        ),
-        "parsed": ExtraccionTecnica(**{**VALIDO, **overrides}),
-        "parsing_error": None,
-    }
+def probar_schemas() -> None:
+    titulo("2. Esquemas Pydantic")
 
+    valido = RespuestaModelo(respuesta="El Sharpe Ratio es (Rp - Rf) / sigma_p.", encontrado_en_contexto=True)
+    check(valido.encontrado_en_contexto is True, "RespuestaModelo acepta una respuesta valida")
 
-def salida_truncada(clave: str = "finish_reason", valor: str = "length") -> dict[str, Any]:
-    """Respuesta cortada: el JSON quedo a medias y no hay objeto parseado."""
-    return {
-        "raw": AIMessage(content='{"tecnologias": ["Fast', response_metadata={clave: valor}),
-        "parsed": None,
-        "parsing_error": ValueError("Unterminated string starting at line 1"),
-    }
+    sin_contexto = RespuestaModelo(respuesta=MENSAJE_SIN_CONTEXTO, encontrado_en_contexto=False)
+    check(sin_contexto.respuesta == MENSAJE_SIN_CONTEXTO, "RespuestaModelo acepta el mensaje fijo de 'no lo se'")
 
-
-def error_de_esquema() -> ValidationError:
-    """Un `ValidationError` real, el que produce una lista de tecnologias vacia."""
     try:
-        ExtraccionTecnica(**{**VALIDO, "tecnologias": []})
-    except ValidationError as exc:
-        return exc
-    raise AssertionError("se esperaba un ValidationError")
+        RespuestaModelo(respuesta="", encontrado_en_contexto=True)
+        check(False, "RespuestaModelo rechaza una respuesta vacia")
+    except ValidationError:
+        check(True, "RespuestaModelo rechaza una respuesta vacia")
 
+    try:
+        RespuestaModelo(respuesta="ok", encontrado_en_contexto=True, campo_extra="no deberia existir")
+        check(False, "RespuestaModelo rechaza campos extra (extra='forbid')")
+    except ValidationError:
+        check(True, "RespuestaModelo rechaza campos extra (extra='forbid')")
 
-def salida_invalida() -> dict[str, Any]:
-    return {
-        "raw": AIMessage(content="", response_metadata={"finish_reason": "stop"}),
-        "parsed": None,
-        "parsing_error": error_de_esquema(),
-    }
+    ref = Referencia(fuente="ratio-de-sharpe.md", fragmento="Sharpe ratio = (Rp - Rf) / sigma_p")
+    rag = RespuestaRAG(respuesta="...", encontrado_en_contexto=True, referencias=[ref])
+    check(len(rag.referencias) == 1, "RespuestaRAG agrupa respuesta + referencias")
 
-
-def salida_sin_herramienta() -> dict[str, Any]:
-    """El modelo contesto en prosa en lugar de llamar a la herramienta."""
-    return {
-        "raw": AIMessage(
-            content="No estoy seguro de que tecnologias menciona el texto.",
-            response_metadata={"finish_reason": "stop"},
-        ),
-        "parsed": None,
-        "parsing_error": None,
-    }
-
-
-class ModeloFalso:
-    """Devuelve una respuesta por intento y cuenta cuantas veces lo llamaron.
-
-    La ultima respuesta de la lista se repite, asi `[truncada()]` simula un
-    proveedor que falla siempre y `[truncada(), ok()]` uno que se recupera.
-    """
-
-    def __init__(self, *respuestas: dict[str, Any]) -> None:
-        self.respuestas = list(respuestas)
-        self.llamadas = 0
-
-    def __call__(self, _entrada: Any) -> dict[str, Any]:
-        indice = min(self.llamadas, len(self.respuestas) - 1)
-        self.llamadas += 1
-        return self.respuestas[indice]
-
-    def runnable(self) -> Runnable[Any, dict[str, Any]]:
-        return RunnableLambda(self.__call__, name="modelo_falso")
-
-
-def cadena_falsa(modelo: ModeloFalso, *, max_intentos: int = 3) -> Runnable[dict, Any]:
-    """El pipeline real con la unica pieza que necesita red reemplazada."""
-    return PROMPT | con_resiliencia(
-        modelo.runnable(), max_intentos=max_intentos, espera_exponencial=False
-    )
+    vacio = RespuestaRAG(respuesta=MENSAJE_SIN_CONTEXTO, encontrado_en_contexto=False)
+    check(vacio.referencias == [], "RespuestaRAG admite referencias vacias por defecto")
 
 
 # ----------------------------------------------------------------------
-# 1. Esquema
-# ----------------------------------------------------------------------
-def probar_esquema() -> None:
-    titulo("1. Esquema Pydantic (schemas.py)")
-
-    valido = ExtraccionTecnica(**VALIDO)
-    check(valido.tecnologias == ["FastAPI", "Redis", "PostgreSQL"], "instancia valida")
-    check(valido.nivel_de_criticidad is NivelDeCriticidad.ALTA, "el enum se resuelve desde el str")
-    check(
-        valido.model_dump()["nivel_de_criticidad"] == "alta",
-        "serializa el nivel como string plano",
-    )
-
-    normalizado = ExtraccionTecnica(
-        **{**VALIDO, "tecnologias": ["  Redis ", "redis", "PostgreSQL", "Fast   API"]}
-    )
-    check(
-        normalizado.tecnologias == ["Redis", "PostgreSQL", "Fast API"],
-        "deduplica sin distinguir mayusculas y colapsa espacios",
-    )
-
-    casos: list[tuple[str, dict[str, Any]]] = [
-        ("rechaza la lista de tecnologias vacia", {"tecnologias": []}),
-        ("rechaza tecnologias que quedan vacias al limpiar", {"tecnologias": ["  ", ""]}),
-        ("rechaza un nivel de criticidad inventado", {"nivel_de_criticidad": "critica"}),
-        ("rechaza un resumen demasiado corto", {"resumen_tecnico": "poco"}),
-        (
-            "rechaza un resumen que no nombra ninguna tecnologia",
-            {"resumen_tecnico": "El sistema presenta algunos problemas de rendimiento."},
-        ),
-        ("rechaza campos que no estan en el contrato", {"severidad": "alta"}),
-    ]
-    for descripcion, override in casos:
-        try:
-            ExtraccionTecnica(**{**VALIDO, **override})
-        except ValidationError:
-            check(True, descripcion)
-        else:
-            check(False, descripcion)
-
-
-# ----------------------------------------------------------------------
-# 2. Prompt template
+# 3. Prompt (chain.py)
 # ----------------------------------------------------------------------
 def probar_prompt() -> None:
-    titulo("2. Prompt template (ChatPromptTemplate, sin f-strings)")
+    titulo("3. Prompt de la cadena de generacion")
 
-    check(PROMPT.input_variables == ["texto"], "la unica variable requerida es 'texto'")
+    check("CONTEXTO" in SISTEMA, "el prompt de sistema instruye a usar solo el CONTEXTO")
+    check(MENSAJE_SIN_CONTEXTO in SISTEMA, "el prompt de sistema fija el mensaje exacto de 'no lo se'")
+    check("{contexto}" in HUMANO and "{pregunta}" in HUMANO, "el prompt humano expone las variables contexto/pregunta")
 
-    mensajes = PROMPT.format_messages(texto="Redis se quedo sin memoria")
-    check(len(mensajes) == 2, "genera un mensaje system y uno human")
-    check(mensajes[0].type == "system" and mensajes[1].type == "human", "roles correctos")
+    mensajes = PROMPT.format_messages(contexto="CTX", pregunta="P")
+    sistema_render = mensajes[0].content
     check(
-        "llama a la herramienta `ExtraccionTecnica`" in mensajes[0].content,
-        "las instrucciones de formato entran por variable, no concatenadas",
-    )
-    check(
-        "<texto>\nRedis se quedo sin memoria\n</texto>" in mensajes[1].content,
-        "el texto de entrada va delimitado dentro del mensaje human",
-    )
-
-    otro = PROMPT.partial(instrucciones_formato="RESPONDE EN INGLES")
-    check(
-        "RESPONDE EN INGLES" in otro.format_messages(texto="x")[0].content,
-        "las instrucciones de formato se pueden sobrescribir sin tocar la plantilla",
+        "RespuestaModelo" in sistema_render or "respuesta" in sistema_render.lower(),
+        "las instrucciones de formato del PydanticOutputParser llegan al prompt final",
     )
 
 
 # ----------------------------------------------------------------------
-# 3. Validacion y reintentos
+# 4. Referencias armadas desde el retriever, no desde el LLM
 # ----------------------------------------------------------------------
-async def probar_resiliencia() -> None:
-    titulo("3. Validacion de la salida y reintentos (.with_retry)")
+def probar_referencias() -> None:
+    titulo("4. Contexto y referencias a partir de Documents")
 
-    modelo = ModeloFalso(salida_ok())
-    resultado = await cadena_falsa(modelo).ainvoke({"texto": "un log cualquiera"})
-    check(isinstance(resultado, ExtraccionTecnica), "camino feliz: devuelve el objeto validado")
-    check(modelo.llamadas == 1, "camino feliz: una sola llamada al modelo")
+    documentos = [
+        Document(page_content="El Sharpe ratio se calcula como (Rp - Rf) / sigma_p.", metadata={"source": "ratio-de-sharpe.md"}),
+        Document(page_content="x" * 400, metadata={"source": "operaciones-compuestas.md"}),
+    ]
 
-    modelo = ModeloFalso(salida_truncada())
-    try:
-        await cadena_falsa(modelo).ainvoke({"texto": "x"})
-        check(False, "respuesta truncada: deberia fallar")
-    except RespuestaTruncadaError:
-        check(True, "detecta finish_reason='length' antes de intentar parsear")
-    check(modelo.llamadas == 3, f"reintenta hasta 3 veces (llamadas={modelo.llamadas})")
+    contexto = _formatear_contexto(documentos)
+    check("[Fuente: ratio-de-sharpe.md]" in contexto, "el contexto etiqueta cada chunk con su fuente")
+    check("[Fuente: operaciones-compuestas.md]" in contexto, "el contexto incluye todos los documentos recuperados")
 
-    modelo = ModeloFalso(salida_truncada("stop_reason", "max_tokens"))
-    try:
-        await cadena_falsa(modelo, max_intentos=1).ainvoke({"texto": "x"})
-        check(False, "stop_reason de Anthropic: deberia fallar")
-    except RespuestaTruncadaError:
-        check(True, "detecta el stop_reason='max_tokens' de Anthropic")
-    check(modelo.llamadas == 1, "max_intentos=1 no reintenta")
+    referencias = _armar_referencias(documentos)
+    check(len(referencias) == len(documentos), "se arma una Referencia por cada Document recuperado")
+    check(referencias[0].fuente == "ratio-de-sharpe.md", "la Referencia conserva el nombre del archivo original")
+    check(len(referencias[1].fragmento) < 400, "un chunk largo se recorta a un extracto en la Referencia")
 
-    modelo = ModeloFalso(salida_invalida())
-    try:
-        await cadena_falsa(modelo).ainvoke({"texto": "x"})
-        check(False, "salida fuera de contrato: deberia fallar")
-    except ExtraccionIncompletaError as exc:
-        check("tecnologias" in str(exc), "el error nombra el campo que fallo la validacion")
-        check(isinstance(exc.__cause__, ValidationError), "conserva el ValidationError original")
-    check(modelo.llamadas == 3, "reintenta tambien ante un JSON fuera de contrato")
+    check(_formatear_contexto([]) != "", "el contexto vacio no rompe el formateo (retriever sin resultados)")
+    check(_armar_referencias([]) == [], "sin documentos recuperados no hay referencias")
 
-    modelo = ModeloFalso(salida_sin_herramienta())
-    try:
-        await cadena_falsa(modelo, max_intentos=2).ainvoke({"texto": "x"})
-        check(False, "sin tool call: deberia fallar")
-    except RespuestaVaciaError as exc:
-        check("No estoy seguro" in str(exc), "muestra la respuesta en prosa del modelo")
-    check(modelo.llamadas == 2, "reintenta cuando el modelo no llama a la herramienta")
 
-    # Lo importante del reintento: que el segundo intento sirva de algo.
-    modelo = ModeloFalso(salida_truncada(), salida_invalida(), salida_ok())
-    resultado = await cadena_falsa(modelo).ainvoke({"texto": "x"})
-    check(
-        isinstance(resultado, ExtraccionTecnica) and modelo.llamadas == 3,
-        "se recupera en el tercer intento tras dos fallas distintas",
+# ----------------------------------------------------------------------
+# 5. Cadena LCEL completa con un chat model falso
+# ----------------------------------------------------------------------
+async def probar_generacion_lcel() -> None:
+    titulo("5. Cadena LCEL (PROMPT | modelo | PydanticOutputParser) con modelo falso")
+
+    modelo_falso = FakeListChatModel(
+        responses=['{"respuesta": "El Sharpe ratio es (Rp - Rf) / sigma_p.", "encontrado_en_contexto": true}']
     )
-
-    # Y que no reintente lo que no tiene sentido reintentar.
-    def explota(_entrada: Any) -> dict[str, Any]:
-        explota.llamadas += 1  # type: ignore[attr-defined]
-        raise PermissionError("401 invalid api key")
-
-    explota.llamadas = 0  # type: ignore[attr-defined]
-    cadena = PROMPT | con_resiliencia(RunnableLambda(explota), espera_exponencial=False)
-    try:
-        await cadena.ainvoke({"texto": "x"})
-        check(False, "un error no contemplado deberia propagarse")
-    except PermissionError:
-        check(True, "un error de autenticacion se propaga tal cual")
-    check(explota.llamadas == 1, "no reintenta ante errores que no son de formato")  # type: ignore[attr-defined]
+    generacion = construir_generacion(modelo_falso)
+    resultado = await generacion.ainvoke({"contexto": "...", "pregunta": "¿Como se calcula el Sharpe ratio?"})
+    check(isinstance(resultado, RespuestaModelo), "el parser devuelve una instancia de RespuestaModelo")
+    check(resultado.encontrado_en_contexto is True, "el JSON del modelo falso se parsea correctamente")
 
 
 # ----------------------------------------------------------------------
-# 4. API asincrona
+# 6. get_rag_response: orquestacion de retriever + generacion
 # ----------------------------------------------------------------------
-async def probar_api_async() -> None:
-    titulo("4. process_text / process_batch")
+async def probar_get_rag_response() -> None:
+    titulo("6. get_rag_response (retriever + generacion, ambos dobles de prueba)")
 
-    modelo = ModeloFalso(salida_ok())
-    resultado = await process_text("  un log con espacios  ", cadena=cadena_falsa(modelo))
-    check(isinstance(resultado, ExtraccionTecnica), "process_text devuelve el objeto validado")
+    documentos_falsos = [
+        Document(page_content="El Sharpe ratio es (Rp - Rf) / sigma_p.", metadata={"source": "ratio-de-sharpe.md"}),
+        Document(page_content="Rp es el retorno promedio diario de la cartera.", metadata={"source": "ratio-de-sharpe.md"}),
+    ]
+    retriever_falso = RunnableLambda(lambda _pregunta: documentos_falsos)
+
+    generacion_ok = RunnableLambda(
+        lambda _entrada: RespuestaModelo(respuesta="El Sharpe ratio es (Rp - Rf) / sigma_p.", encontrado_en_contexto=True)
+    )
+    resultado = await get_rag_response("¿Como se calcula el Sharpe ratio?", retriever=retriever_falso, generacion=generacion_ok)
+    check(isinstance(resultado, RespuestaRAG), "get_rag_response devuelve un RespuestaRAG")
+    check(resultado.encontrado_en_contexto is True, "propaga encontrado_en_contexto del modelo")
+    check(len(resultado.referencias) == 2, "adjunta una referencia por cada Document recuperado")
+
+    generacion_sin_contexto = RunnableLambda(
+        lambda _entrada: RespuestaModelo(respuesta=MENSAJE_SIN_CONTEXTO, encontrado_en_contexto=False)
+    )
+    resultado_trampa = await get_rag_response(
+        "¿Cuanto cobra Alphinance de interes hipotecario?", retriever=retriever_falso, generacion=generacion_sin_contexto
+    )
+    check(resultado_trampa.respuesta == MENSAJE_SIN_CONTEXTO, "una pregunta trampa devuelve el mensaje fijo de 'no lo se'")
 
     try:
-        await process_text("   ", cadena=cadena_falsa(ModeloFalso(salida_ok())))
-        check(False, "texto vacio: deberia fallar")
+        await get_rag_response("   ", retriever=retriever_falso, generacion=generacion_ok)
+        check(False, "get_rag_response rechaza una consulta vacia")
     except ValueError:
-        check(True, "process_text rechaza un texto vacio sin llamar al modelo")
-
-    modelo = ModeloFalso(salida_ok())
-    lote = await process_batch(["texto uno", "texto dos"], cadena=cadena_falsa(modelo))
-    check(len(lote) == 2, "process_batch devuelve un resultado por texto")
-    check(all(isinstance(r, ExtraccionTecnica) for r in lote), "process_batch valida cada salida")
-
-    modelo = ModeloFalso(salida_invalida())
-    lote = await process_batch(["a", "b"], cadena=cadena_falsa(modelo, max_intentos=1))
-    check(
-        all(isinstance(r, SalidaNoValidaError) for r in lote),
-        "process_batch devuelve los errores como dato, sin cortar el lote",
-    )
-
-    # Concurrencia real: dos textos procesados en paralelo.
-    resultados = await asyncio.gather(
-        process_text("uno", cadena=cadena_falsa(ModeloFalso(salida_ok()))),
-        process_text("dos", cadena=cadena_falsa(ModeloFalso(salida_ok()))),
-    )
-    check(len(resultados) == 2, "asyncio.gather sobre process_text funciona")
+        check(True, "get_rag_response rechaza una consulta vacia")
 
 
-# ----------------------------------------------------------------------
 async def main() -> int:
-    print("=" * 72)
-    print("Validacion offline del pipeline de extraccion (sin red, sin API keys)")
-    print("=" * 72)
-
-    probar_esquema()
+    probar_chunking()
+    probar_schemas()
     probar_prompt()
-    await probar_resiliencia()
-    await probar_api_async()
+    probar_referencias()
+    await probar_generacion_lcel()
+    await probar_get_rag_response()
 
     print("\n" + "=" * 72)
     if fallas:

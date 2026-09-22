@@ -1,116 +1,70 @@
-"""Contrato de salida del pipeline: lo unico que el resto del codigo conoce.
+"""Contratos Pydantic de la cadena RAG: lo que el LLM completa y lo que el
+sistema le agrega antes de entregarlo al usuario.
 
-El esquema cumple dos roles a la vez y por eso vale la pena escribirlo con
-cuidado:
+Se separan dos modelos a proposito:
 
-1. **Le dice al modelo que queremos.** `with_structured_output()` traduce esta
-   clase a un JSON Schema y se lo pasa al LLM como definicion de herramienta,
-   asi que cada `description=` es, literalmente, parte del prompt.
-2. **Es el control de calidad.** Si la respuesta no respeta las restricciones,
-   Pydantic levanta `ValidationError` y la cadena reintenta (ver `chain.py`).
-
-Las restricciones son deliberadamente estrictas: preferimos un reintento a un
-objeto vacio que despues rompe rio abajo.
+* `RespuestaModelo` es lo unico que el LLM redacta, y es deliberadamente
+  chico (dos campos). Las referencias NO las escribe el modelo: si le
+  pidieramos que las redactara, podria citar una fuente que nunca recupero
+  (alucinacion de cita) o inventar un fragmento que no existe en ningun
+  documento. `PydanticOutputParser` valida este objeto contra el JSON que
+  devuelve el LLM.
+* `RespuestaRAG` es la salida final que ve `get_rag_response()`: la
+  respuesta ya validada mas las referencias, que el propio retriever arma a
+  partir de los metadatos de los chunks efectivamente recuperados en
+  ChromaDB (ver `chain.py::_armar_referencias`).
 """
 
 from __future__ import annotations
 
-from enum import StrEnum
-from typing import Self
+from pydantic import BaseModel, ConfigDict, Field
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+__all__ = ["Referencia", "RespuestaModelo", "RespuestaRAG"]
 
-__all__ = ["ExtraccionTecnica", "NivelDeCriticidad"]
-
-
-class NivelDeCriticidad(StrEnum):
-    """Escala cerrada: el modelo no puede inventar un nivel intermedio."""
-
-    BAJA = "baja"
-    MEDIA = "media"
-    ALTA = "alta"
+#: Mensaje fijo que el prompt le exige al modelo cuando el contexto no alcanza.
+#: Se centraliza aca para que el prompt (chain.py) y las pruebas offline
+#: (validate_offline.py) usen exactamente el mismo texto.
+MENSAJE_SIN_CONTEXTO = "No tengo esa informacion en los documentos disponibles."
 
 
-class ExtraccionTecnica(BaseModel):
-    """Entidades tecnicas extraidas de un texto libre.
+class RespuestaModelo(BaseModel):
+    """Lo que el LLM devuelve, parseado por `PydanticOutputParser`."""
 
-    Ejemplo de instancia valida::
-
-        ExtraccionTecnica(
-            tecnologias=["FastAPI", "Redis", "PostgreSQL"],
-            nivel_de_criticidad=NivelDeCriticidad.ALTA,
-            resumen_tecnico=(
-                "API con cache en Redis y persistencia en PostgreSQL; "
-                "cuello de botella en conexiones concurrentes."
-            ),
-        )
-    """
-
-    # extra="forbid" es intencional: si el modelo agrega un campo que no
-    # pedimos, preferimos enterarnos (y reintentar) antes que ignorarlo.
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    tecnologias: list[str] = Field(
+    respuesta: str = Field(
         min_length=1,
-        max_length=25,
+        max_length=2000,
         description=(
-            "Nombres propios de tecnologias, servicios, lenguajes o librerias "
-            "mencionados en el texto (ej: 'FastAPI', 'Redis', 'PostgreSQL'). "
-            "Sin duplicados y sin categorias genericas como 'base de datos'. "
-            "Si el texto no menciona ninguna, no inventes: la extraccion falla."
+            "La respuesta a la pregunta del usuario, redactada solo con "
+            "informacion presente en el CONTEXTO. Si el contexto no alcanza "
+            f"para responder, el texto debe ser exactamente: {MENSAJE_SIN_CONTEXTO!r}"
         ),
     )
-    nivel_de_criticidad: NivelDeCriticidad = Field(
+    encontrado_en_contexto: bool = Field(
         description=(
-            "Impacto operativo que describe el texto. "
-            "'alta' = hay una falla, caida o riesgo inmediato en produccion; "
-            "'media' = degradacion, deuda tecnica o riesgo latente; "
-            "'baja' = descripcion informativa, sin incidente."
-        ),
-    )
-    resumen_tecnico: str = Field(
-        min_length=20,
-        max_length=400,
-        description=(
-            "Una o dos oraciones en espanol explicando que hace el sistema y "
-            "cual es el problema o riesgo principal. Debe nombrar al menos una "
-            "de las tecnologias listadas."
-        ),
+            "true si la respuesta se pudo construir con el CONTEXTO "
+            "recuperado; false si el contexto no contenia la informacion "
+            "necesaria (en ese caso 'respuesta' debe ser el mensaje fijo de "
+            "'no lo se')."
+        )
     )
 
-    @field_validator("tecnologias", mode="after")
-    @classmethod
-    def _normalizar_tecnologias(cls, valores: list[str]) -> list[str]:
-        """Colapsa espacios, descarta vacios y deduplica sin distinguir mayusculas.
 
-        El modelo suele devolver `["Redis", "redis "]`: normalizarlo aca evita
-        que cada consumidor tenga que hacerlo de nuevo.
-        """
-        vistas: set[str] = set()
-        limpias: list[str] = []
-        for bruto in valores:
-            nombre = " ".join(bruto.split())
-            clave = nombre.casefold()
-            if not nombre or clave in vistas:
-                continue
-            vistas.add(clave)
-            limpias.append(nombre)
-        if not limpias:
-            raise ValueError("tecnologias quedo vacia despues de limpiar los valores")
-        return limpias
+class Referencia(BaseModel):
+    """Un fragmento efectivamente recuperado por ChromaDB (no redactado por el LLM)."""
 
-    @model_validator(mode="after")
-    def _resumen_coherente(self) -> Self:
-        """El resumen tiene que hablar de lo que se extrajo.
+    model_config = ConfigDict(extra="forbid")
 
-        Es la validacion cruzada que atrapa la respuesta perezosa: una lista de
-        tecnologias correcta acompanada de un resumen generico del estilo
-        "el sistema presenta problemas". Si no coinciden, se reintenta.
-        """
-        resumen = self.resumen_tecnico.casefold()
-        if not any(tec.casefold() in resumen for tec in self.tecnologias):
-            raise ValueError(
-                "resumen_tecnico debe mencionar al menos una de las tecnologias "
-                f"extraidas: {self.tecnologias}"
-            )
-        return self
+    fuente: str = Field(description="Nombre del archivo de origen del fragmento.")
+    fragmento: str = Field(description="Extracto del chunk usado como contexto.")
+
+
+class RespuestaRAG(BaseModel):
+    """Salida final de `get_rag_response()`: respuesta validada + referencias verificables."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    respuesta: str
+    encontrado_en_contexto: bool
+    referencias: list[Referencia] = Field(default_factory=list)

@@ -1,54 +1,94 @@
-# Pipeline de extracción de entidades técnicas (LCEL + Pydantic)
+# RAG end-to-end sobre los PRDs de Alphinance (ChromaDB + LCEL + Pydantic)
 
-Recibe un párrafo de texto sin procesar —un log de error, una descripción de
-arquitectura— y devuelve un objeto **validado**, no un string con JSON adentro.
+Un pipeline RAG completo: ingesta documentos `.md`, los persiste en
+ChromaDB, y responde preguntas del usuario **solo** con lo que esos
+documentos dicen. Si la respuesta no está en el contexto recuperado, el
+sistema dice que no la tiene — no alucina.
 
 ```python
 import asyncio
-from chain import process_text
+from chain import get_rag_response
 
-resultado = asyncio.run(process_text(
-    "504 Gateway Timeout en POST /v1/orders: el pool de PostgreSQL quedó "
-    "saturado porque el caché de Redis se invalidó entero tras el deploy y "
-    "todas las requests de FastAPI fueron a la base."
+resultado = asyncio.run(get_rag_response(
+    "¿Cuál es la fórmula del Ratio de Sharpe y qué representa cada término?"
 ))
 print(resultado.model_dump_json(indent=2))
 ```
 
 ```json
 {
-  "tecnologias": ["PostgreSQL", "Redis", "FastAPI"],
-  "nivel_de_criticidad": "alta",
-  "resumen_tecnico": "El pool de conexiones de PostgreSQL se saturó tras invalidarse el caché de Redis, lo que derivó todas las requests de FastAPI a la base y provocó timeouts."
+  "respuesta": "La fórmula del Ratio de Sharpe es Sharpe ratio = (Rp − Rf) / σp. Rp es el retorno promedio diario de la cartera, Rf la tasa libre de riesgo diaria y σp la volatilidad (desvío estándar) de los retornos.",
+  "encontrado_en_contexto": true,
+  "referencias": [
+    {"fuente": "ratio-de-sharpe.md", "fragmento": "## Requerimiento técnico funcional\n\n### Fórmula general..."}
+  ]
 }
 ```
 
-`resultado` es una instancia de `ExtraccionTecnica`: si el modelo hubiera
-devuelto una lista vacía, un nivel inventado o un JSON cortado a la mitad, la
-cadena lo habría detectado y reintentado antes de llegar a esta línea.
-
-## La cadena, en una expresión
+Y frente a algo que los documentos no cubren:
 
 ```python
-PROMPT | modelo.with_structured_output(ExtraccionTecnica, include_raw=True) | _validar
-#                                                                      └─ .with_retry(...)
+asyncio.run(get_rag_response("¿Qué tasa de interés cobra Alphinance por un préstamo personal?"))
+# respuesta: "No tengo esa informacion en los documentos disponibles."
+# encontrado_en_contexto: false
 ```
 
-| Eslabón | Qué aporta |
-| --- | --- |
-| `PROMPT` | `ChatPromptTemplate` con dos variables (`texto`, `instrucciones_formato`). Sin f-strings: las variables las gestiona LangChain. |
-| `with_structured_output(..., include_raw=True)` | El esquema Pydantic viaja como definición de herramienta; el modelo responde con JSON tipado. |
-| `_validar` | Mira el `finish_reason`, el `parsing_error` y el objeto parseado, y traduce cada falla a una excepción propia. |
-| `.with_retry(...)` | Vuelve a llamar al modelo **solo** ante esas excepciones, con backoff exponencial y jitter. |
+## El "cerebro": PRDs funcionales de Alphinance
 
-## Estructura
+`data/` tiene 4 documentos de especificación funcional de la misma
+plataforma (Alphinance, un sistema de inversiones), elegidos porque se
+referencian entre sí y comparten vocabulario técnico — el escenario real
+donde un RAG con `top_k` chico (no todo el corpus) demuestra su valor:
+
+| Archivo | Contenido |
+| --- | --- |
+| [data/cuentas-origen-destino.md](data/cuentas-origen-destino.md) | Cuentas origen/destino de fondos en una operación |
+| [data/operaciones-compuestas.md](data/operaciones-compuestas.md) | Operaciones que generan múltiples líneas vinculadas (transferencias, forex, FCI en especie, opciones) |
+| [data/anulacion-operaciones.md](data/anulacion-operaciones.md) | Reglas de anulación, saldos negativos y recálculo FIFO |
+| [data/ratio-de-sharpe.md](data/ratio-de-sharpe.md) | Widget de dashboard: fórmula y cálculo paso a paso del Sharpe ratio |
+
+## Arquitectura
+
+```
+data/*.md  ->  ingest.py (chunking)  ->  ChromaDB (./vectorstore)
+                                              |
+pregunta  ->  retriever.ainvoke() (top_k=4) --+
+                                              |
+                                    contexto + pregunta
+                                              |
+                              PROMPT | modelo | PydanticOutputParser   <- chain.py (LCEL)
+                                              |
+                                     RespuestaModelo (LLM)
+                                              |
+                     + referencias reales (metadatos del retriever)
+                                              |
+                                      RespuestaRAG (schemas.py)
+```
 
 | Archivo | Rol |
 | --- | --- |
-| [schemas.py](schemas.py) | `ExtraccionTecnica` y `NivelDeCriticidad`: el contrato de salida y sus restricciones |
-| [chain.py](chain.py) | Prompt, factory de modelos, validación, reintentos, `process_text()` y `process_batch()` |
-| [main.py](main.py) | Mini script de prueba asíncrono contra la API real (4 demos) |
-| [validate_offline.py](validate_offline.py) | 36 verificaciones sin red, sin API keys y sin SDKs |
+| [schemas.py](schemas.py) | `RespuestaModelo` (lo que redacta el LLM), `Referencia` y `RespuestaRAG` (la salida final) |
+| [llm.py](llm.py) | `crear_modelo()` / `crear_embeddings()`: factory multi-proveedor (openai / gemini), misma lógica de resolución para las dos familias |
+| [ingest.py](ingest.py) | Módulo de ingesta: lee `data/`, fragmenta y persiste en ChromaDB (idempotente) |
+| [chain.py](chain.py) | Prompt, `PROMPT \| modelo \| PydanticOutputParser` (LCEL) y `get_rag_response()` async |
+| [main.py](main.py) | Demo contra la API real: ingesta + una pregunta con respuesta en los documentos + una pregunta trampa |
+| [validate_offline.py](validate_offline.py) | 35 verificaciones sin red, sin API keys y sin ChromaDB real |
+
+### Por qué las referencias no las escribe el LLM
+
+`RespuestaModelo` (lo único que el LLM completa) solo tiene `respuesta` y
+`encontrado_en_contexto`. Las `referencias` de `RespuestaRAG` se arman en
+`chain.py::_armar_referencias()` a partir de los metadatos que devuelve el
+retriever de ChromaDB — no de lo que el modelo diga que usó. Si dejáramos
+que el LLM redactara sus propias citas, podría citar una fuente que nunca
+recuperó (alucinación de cita); con esta separación, toda referencia que
+aparece en la respuesta es, por construcción, un chunk que realmente estuvo
+en el contexto.
+
+Por la misma razón, `get_rag_response()` siempre adjunta las referencias
+que trajo el retriever, incluso cuando `encontrado_en_contexto=false`: eso
+permite ver qué fragmentos se recuperaron (y verificar que, en efecto, no
+eran relevantes) en vez de esconderlos.
 
 ## Instalación
 
@@ -61,146 +101,74 @@ copy .env.example .env           # y completar la key del proveedor a usar
 ```
 
 ```bash
-# Linux / macOS
-python -m venv .venv && source .venv/bin/activate
+# macOS / Linux
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
 
+`.env` solo necesita una API key: `GEMINI_API_KEY` (o `OPENAI_API_KEY` si
+se cambia `LLM_PROVIDER=openai`). **Importante**: el mismo proveedor se usa
+para chat y para embeddings — ver la sección de "Embeddings no
+coincidentes" más abajo.
+
+## Cómo correrlo
+
 ```bash
-python validate_offline.py     # no necesita API key ni red
-python main.py                 # las 4 demos contra la API (~10 llamadas)
-python main.py anthropic       # fuerza un proveedor
-python main.py gemini 1 2      # solo las demos 1 y 2
+python validate_offline.py   # sin red, sin API key: valida chunking, esquemas, prompt y la cadena LCEL con un modelo falso
+python main.py                # ingesta (si hace falta) + una pregunta respondible + una pregunta trampa
+python main.py --forzar       # reindexa data/ desde cero (por si se editaron los .md)
 ```
 
-## El contrato (`schemas.py`)
+`python ingest.py` también se puede correr solo, para poblar
+`./vectorstore` sin disparar ninguna consulta.
 
-```python
-class ExtraccionTecnica(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+## Chunking
 
-    tecnologias: list[str] = Field(min_length=1, max_length=25, description=...)
-    nivel_de_criticidad: NivelDeCriticidad          # enum: baja | media | alta
-    resumen_tecnico: str = Field(min_length=20, max_length=400, description=...)
-```
+`RecursiveCharacterTextSplitter` con `chunk_size` ≈ 500 tokens y `overlap`
+≈ 50 tokens (mínimo pedido por la consigna), separando primero por sección
+(`##`/`###`), después por párrafo y por oración antes de cortar a lo bruto.
 
-El esquema hace dos trabajos a la vez, y por eso vale la pena escribirlo con
-cuidado: cada `description=` termina dentro del prompt (es lo que
-`with_structured_output()` le manda al modelo como definición de herramienta), y
-las restricciones son el control de calidad de lo que vuelve.
+El splitter mide en caracteres, no en tokens exactos. En vez de
+`from_tiktoken_encoder` (que en la primera corrida descarga el archivo de
+encoding de tiktoken desde internet) se usa la heurística estándar de ~4
+caracteres por token en prosa en español/inglés — una aproximación
+documentada, elegida para que `validate_offline.py` pueda correr sin red.
+Ver `ingest.py::CHUNK_SIZE`.
 
-Las restricciones son deliberadamente estrictas —un reintento es más barato que
-un objeto vacío que rompe río abajo:
+## Persistencia
 
-- `tecnologias` no puede estar vacía; se normalizan espacios y se deduplica sin
-  distinguir mayúsculas (`["Redis", "redis "]` → `["Redis"]`).
-- `nivel_de_criticidad` es un `StrEnum`: el modelo no puede inventar "crítica".
-- `resumen_tecnico` tiene que **mencionar al menos una de las tecnologías
-  extraídas** (validación cruzada con `@model_validator`). Es lo que atrapa la
-  respuesta perezosa: lista correcta + resumen genérico del estilo "el sistema
-  presenta problemas".
-- `extra="forbid"`: un campo de más también dispara el reintento.
+`ingest.py::ingerir()` abre la colección de `./vectorstore` y, si ya tiene
+chunks, **no vuelve a embeberlos** (evita gastar cuota de la API de
+embeddings en cada corrida de `main.py`). Para reconstruirla desde cero —
+por ejemplo, después de editar los `.md` de `data/` — usar `--forzar` o
+`ingerir(forzar=True)`.
 
-## La resiliencia (`chain.py`)
+`./vectorstore` está en `.gitignore`: no se versiona, se reconstruye con
+`python ingest.py` en cualquier máquina.
 
-El pipeline distingue tres formas de fallar, y las tres reintentan:
+## Errores comunes que este proyecto evita a propósito
 
-| Situación | Excepción | Cómo se detecta |
-| --- | --- | --- |
-| El modelo se quedó sin tokens y cortó el JSON | `RespuestaTruncadaError` | `finish_reason` / `stop_reason` del mensaje crudo |
-| El JSON llegó entero pero no cumple el contrato | `ExtraccionIncompletaError` | el `parsing_error` que devuelve `include_raw=True` |
-| El modelo contestó en prosa y nunca llamó a la herramienta | `RespuestaVaciaError` | `parsed is None` |
+- **Contexto infinito**: `TOP_K = 4` (ver `chain.py`). Pasar 20-30
+  fragmentos al prompt no mejora la respuesta: la degrada (lost in the
+  middle) y acerca el límite de tokens.
+- **Embeddings no coincidentes**: `llm.py::crear_embeddings()` resuelve el
+  proveedor con la misma lógica que `crear_modelo()` (mismo `LLM_PROVIDER`
+  del `.env`), así que `ingest.py` y `chain.py` no pueden indexar con un
+  modelo de embeddings y consultar con otro por accidente. Mezclarlos no
+  tira un error: tira resultados que parecen aleatorios, porque la
+  distancia vectorial entre espacios de proveedores distintos no significa
+  nada.
+- **Falta de persistencia**: `ingerir()` verifica `coleccion.count() > 0`
+  antes de reembeber (ver arriba).
 
-```python
-(estructurado | RunnableLambda(_validar)).with_retry(
-    retry_if_exception_type=(SalidaNoValidaError, ValidationError),
-    stop_after_attempt=3,
-    wait_exponential_jitter=True,
-)
-```
+## Nota sobre la cuota de la API
 
-Solo se reintenta eso. Un 401 o un modelo inexistente se propagan tal cual: no
-tiene sentido reintentar tres veces algo que no va a cambiar, y los 429 y los
-errores de red ya los reintenta el SDK del proveedor.
-
-### Por qué `include_raw=True`
-
-Es la parte que se suele saltear. Sin él, un JSON cortado a la mitad llega como
-una excepción de parseo opaca (`Unterminated string...`) y el mensaje original
-se pierde. Con él, la cadena recibe `{"raw", "parsed", "parsing_error"}` y puede
-mirar el `finish_reason` **antes** de confiar en el objeto:
-
-```
-WARNING  clase_2.chain: respuesta cortada por el proveedor (finish_reason=max_tokens): reintento
-```
-
-Cada proveedor lo nombra distinto —OpenAI y Gemini usan `finish_reason`,
-Anthropic usa `stop_reason`—, así que `_motivo_de_corte()` normaliza los tres.
-La demo 4 de `main.py` lo fuerza con `max_tokens=16`.
-
-## Proveedores
-
-`crear_modelo()` replica el factory del Módulo 1 (`llm_client/factory.py` de la
-entrega anterior) sobre los chat models de LangChain: mismo nombre de variable
-(`LLM_PROVIDER`), mismos nombres de proveedor y el mismo import perezoso, así
-que usar Gemini no obliga a instalar los otros dos SDKs.
-
-| `LLM_PROVIDER` | Clase | Modelo por defecto |
-| --- | --- | --- |
-| `openai` | `ChatOpenAI` | `gpt-4.1-mini` |
-| `anthropic` | `ChatAnthropic` | `claude-sonnet-5` |
-| `gemini` (alias `google`) | `ChatGoogleGenerativeAI` | `gemini-3.6-flash` |
-
-Sin `LLM_PROVIDER`, se usa el primero que tenga API key en el entorno.
-`LLM_MODEL` pisa el modelo por defecto.
-
-`temperature=0`: esto es extracción, no redacción; para el mismo texto queremos
-la misma salida.
-
-## Dos cosas que aparecieron probando contra la API real
-
-**`max_tokens=1024` no alcanza.** Suena generoso para un JSON de tres campos,
-pero los modelos actuales razonan antes de responder y ese razonamiento sale del
-mismo presupuesto: con `gemini-3.6-flash` cada extracción consumió entre 550 y
-900 tokens de salida. Con 1024, el truncado dejaba de ser un caso de borde y
-pasaba a ser el caso normal. El default quedó en `MAX_TOKENS = 2048`.
-
-**La validación no atrapa la alucinación.** En la prueba de estrés (demo 2) se
-le pasa un texto sin ninguna tecnología. Lo esperable es que `min_length=1`
-rechace la lista vacía y se agoten los reintentos; lo que a veces pasa es que el
-modelo, presionado por el contrato, devuelve `{"tecnologias": ["Panaderia"]}`.
-El JSON es válido y el pipeline lo acepta. El límite es real y conviene tenerlo
-presente: Pydantic verifica la **forma**, no la **verdad**. Eso se ataca en el
-prompt, o agregando al esquema un campo de confianza o un booleano
-`contiene_tecnologias` que el modelo pueda poner en `false` sin sentir que
-incumple.
-
-## Validación offline
-
-`validate_offline.py` reemplaza la única pieza que necesita red —la capa
-`with_structured_output`— por un runnable falso que devuelve exactamente la
-misma forma. Eso permite testear de forma determinista lo que contra la API real
-sería un volado: cuántas veces reintenta, ante qué excepciones, y qué pasa
-cuando el segundo intento sale bien.
-
-```
-1. Esquema Pydantic (schemas.py)                        10 checks
-2. Prompt template (ChatPromptTemplate, sin f-strings)   6 checks
-3. Validacion de la salida y reintentos (.with_retry)   14 checks
-4. process_text / process_batch                          6 checks
-
-Todas las verificaciones pasaron.
-```
-
-## Checklist de la entrega
-
-| Requisito | Dónde |
-| --- | --- |
-| Esquema Pydantic con `tecnologias`, `nivel_de_criticidad` (enum) y `resumen_tecnico` | [schemas.py](schemas.py) |
-| Prompt template modular que acepta el texto y las instrucciones de formato | `PROMPT` en [chain.py](chain.py) |
-| Cadena LCEL `prompt \| model.with_structured_output(Schema)` | `construir_cadena()` en [chain.py](chain.py) |
-| Reintento ante JSON mal formado o incompleto (`.with_retry()`) | `con_resiliencia()` en [chain.py](chain.py) |
-| Detección de `finish_reason` antes de transformar el objeto | `_validar()` / `_motivo_de_corte()` en [chain.py](chain.py) |
-| `async def process_text(text)` con `.ainvoke()` y logs de validación | [chain.py](chain.py) |
-| Mini script de prueba asíncrono | [main.py](main.py) y [validate_offline.py](validate_offline.py) |
+El entorno del curso solo tiene configurada `GEMINI_API_KEY`, de free tier:
+**20 requests por día y por modelo** (separado para el modelo de chat y el
+de embeddings). Una corrida completa de `main.py` gasta ~1 llamada de
+embeddings (la ingesta embebe los 35 chunks en un solo batch) + 2 llamadas
+de embeddings de consulta + 2 llamadas de chat — muy por debajo del límite.
+Aun así, para iterar sobre chunking, esquemas o el prompt sin tocar la red,
+usar `validate_offline.py`.

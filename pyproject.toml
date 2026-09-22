@@ -1,19 +1,21 @@
 [project]
-name = "pipeline-extraccion-tecnica"
+name = "rag-alphinance-prds"
 version = "1.0.0"
-description = "Pipeline LCEL de extraccion de entidades tecnicas con salida validada por Pydantic"
+description = "RAG end-to-end (ChromaDB + LCEL + Pydantic) sobre los PRDs funcionales de Alphinance"
 requires-python = ">=3.12"
 dependencies = [
     "langchain-core>=0.3.60",
+    "langchain-text-splitters>=0.3",
+    "langchain-chroma>=0.2",
+    "chromadb>=0.5",
     "pydantic>=2.9,<3",
     "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
 openai = ["langchain-openai>=0.3"]
-anthropic = ["langchain-anthropic>=0.3"]
 gemini = ["langchain-google-genai>=2.1"]
-all = ["langchain-openai>=0.3", "langchain-anthropic>=0.3", "langchain-google-genai>=2.1"]
+all = ["langchain-openai>=0.3", "langchain-google-genai>=2.1"]
 
 [tool.ruff]
 line-length = 100
