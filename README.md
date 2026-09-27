@@ -7,7 +7,7 @@ sistema dice que no la tiene — no alucina.
 
 ```python
 import asyncio
-from chain import get_rag_response
+from rag import get_rag_response
 
 resultado = asyncio.run(get_rag_response(
     "¿Cuáles son los horarios de check-in y check-out, y cuánto cuesta un late check-out?"
@@ -56,7 +56,7 @@ pregunta  ->  retriever.ainvoke() (top_k=4) --+
                                               |
                                     contexto + pregunta
                                               |
-                              PROMPT | modelo | PydanticOutputParser   <- chain.py (LCEL)
+                              PROMPT | modelo | PydanticOutputParser   <- rag.py (LCEL)
                                               |
                                      RespuestaModelo (LLM)
                                               |
@@ -70,7 +70,7 @@ pregunta  ->  retriever.ainvoke() (top_k=4) --+
 | [schemas.py](schemas.py) | `RespuestaModelo` (lo que redacta el LLM), `Referencia` y `RespuestaRAG` (la salida final) |
 | [llm.py](llm.py) | `crear_modelo()` / `crear_embeddings()`: factory multi-proveedor (openai / gemini), misma lógica de resolución para las dos familias |
 | [ingest.py](ingest.py) | Módulo de ingesta: lee `data/`, fragmenta y persiste en ChromaDB (idempotente) |
-| [chain.py](chain.py) | Prompt, `PROMPT \| modelo \| PydanticOutputParser` (LCEL) y `get_rag_response()` async |
+| [rag.py](rag.py) | Prompt, `PROMPT \| modelo \| PydanticOutputParser` (LCEL) y `get_rag_response()` async |
 | [main.py](main.py) | Demo contra la API real: ingesta + una pregunta con respuesta en los documentos + una pregunta trampa |
 | [validate_offline.py](validate_offline.py) | 35 verificaciones sin red, sin API keys y sin ChromaDB real |
 
@@ -78,7 +78,7 @@ pregunta  ->  retriever.ainvoke() (top_k=4) --+
 
 `RespuestaModelo` (lo único que el LLM completa) solo tiene `respuesta` y
 `encontrado_en_contexto`. Las `referencias` de `RespuestaRAG` se arman en
-`chain.py::_armar_referencias()` a partir de los metadatos que devuelve el
+`rag.py::_armar_referencias()` a partir de los metadatos que devuelve el
 retriever de ChromaDB — no de lo que el modelo diga que usó. Si dejáramos
 que el LLM redactara sus propias citas, podría citar una fuente que nunca
 recuperó (alucinación de cita); con esta separación, toda referencia que
@@ -197,12 +197,12 @@ reconstruirla desde cero — por ejemplo, después de editar los `.md` de
 
 ## Errores comunes que este proyecto evita a propósito
 
-- **Contexto infinito**: `TOP_K = 4` (ver `chain.py`). Pasar 20-30
+- **Contexto infinito**: `TOP_K = 4` (ver `rag.py`). Pasar 20-30
   fragmentos al prompt no mejora la respuesta: la degrada (lost in the
   middle) y acerca el límite de tokens.
 - **Embeddings no coincidentes**: `llm.py::crear_embeddings()` resuelve el
   proveedor con la misma lógica que `crear_modelo()` (mismo `LLM_PROVIDER`
-  del `.env`), así que `ingest.py` y `chain.py` no pueden indexar con un
+  del `.env`), así que `ingest.py` y `rag.py` no pueden indexar con un
   modelo de embeddings y consultar con otro por accidente. Mezclarlos no
   tira un error: tira resultados que parecen aleatorios, porque la
   distancia vectorial entre espacios de proveedores distintos no significa

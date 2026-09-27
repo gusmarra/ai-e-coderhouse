@@ -34,7 +34,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.runnables import RunnableLambda
 from pydantic import ValidationError
 
-from chain import (
+from rag import (
     HUMANO,
     PROMPT,
     SISTEMA,
@@ -128,7 +128,7 @@ def probar_schemas() -> None:
 
 
 # ----------------------------------------------------------------------
-# 3. Prompt (chain.py)
+# 3. Prompt (rag.py)
 # ----------------------------------------------------------------------
 def probar_prompt() -> None:
     titulo("3. Prompt de la cadena de generacion")

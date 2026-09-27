@@ -29,7 +29,7 @@ import warnings
 
 from dotenv import load_dotenv
 
-from chain import get_rag_response
+from rag import get_rag_response
 from ingest import ingerir
 from llm import proveedores_disponibles
 from schemas import RespuestaRAG

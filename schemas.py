@@ -12,7 +12,7 @@ Se separan dos modelos a proposito:
 * `RespuestaRAG` es la salida final que ve `get_rag_response()`: la
   respuesta ya validada mas las referencias, que el propio retriever arma a
   partir de los metadatos de los chunks efectivamente recuperados en
-  ChromaDB (ver `chain.py::_armar_referencias`).
+  ChromaDB (ver `rag.py::_armar_referencias`).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 __all__ = ["Referencia", "RespuestaModelo", "RespuestaRAG"]
 
 #: Mensaje fijo que el prompt le exige al modelo cuando el contexto no alcanza.
-#: Se centraliza aca para que el prompt (chain.py) y las pruebas offline
+#: Se centraliza aca para que el prompt (rag.py) y las pruebas offline
 #: (validate_offline.py) usen exactamente el mismo texto.
 MENSAJE_SIN_CONTEXTO = "No tengo esa informacion en los documentos disponibles."
 

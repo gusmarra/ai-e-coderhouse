@@ -42,7 +42,7 @@ __all__ = [
     "retriever_por_defecto",
 ]
 
-log = logging.getLogger("clase_3.chain")
+log = logging.getLogger("clase_3.rag")
 
 #: Entre 3 y 5, como pide la consigna: mas fragmentos no mejora la respuesta,
 #: satura el contexto ("contexto infinito") y degrada la atencion del modelo

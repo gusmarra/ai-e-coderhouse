@@ -9,7 +9,7 @@ en tiempo de consulta: son espacios vectoriales distintos entre proveedores
 error — tira resultados que parecen aleatorios (la distancia coseno entre un
 vector de OpenAI y uno de Gemini no significa nada). `crear_embeddings()`
 resuelve el proveedor con la misma logica que `crear_modelo()`, y tanto
-`ingest.py` como `chain.py` la llaman sin argumentos: mientras ambos lean
+`ingest.py` como `rag.py` la llaman sin argumentos: mientras ambos lean
 `LLM_PROVIDER` del mismo `.env`, no pueden divergir por accidente.
 
 Solo se soportan `openai` y `gemini`: Anthropic no expone una API de
