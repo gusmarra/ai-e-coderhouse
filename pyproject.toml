@@ -1,7 +1,7 @@
 [project]
-name = "rag-alphinance-prds"
+name = "rag-hotel-bahia-serena"
 version = "1.0.0"
-description = "RAG end-to-end (ChromaDB + LCEL + Pydantic) sobre los PRDs funcionales de Alphinance"
+description = "RAG end-to-end (ChromaDB + LCEL + Pydantic) sobre los documentos institucionales del Hotel Bahia Serena"
 requires-python = ">=3.12"
 dependencies = [
     "langchain-core>=0.3.60",

@@ -25,7 +25,7 @@ log = logging.getLogger("clase_3.ingest")
 
 DATA_DIR = Path(__file__).parent / "data"
 PERSIST_DIR = Path(__file__).parent / "vectorstore"
-COLLECTION_NAME = "alphinance_prds"
+COLLECTION_NAME = "hotel_bahia_serena"
 
 #: Tamano de chunk pedido por la consigna: "minimo 500 tokens con 50 de
 #: overlap". `RecursiveCharacterTextSplitter` mide en caracteres, no en

@@ -2,9 +2,9 @@
 
 Corre dos demos, tal como pide la consigna:
 
-1. **Camino feliz**: una pregunta cuya respuesta esta en los documentos de
-   `data/` (Ratio de Sharpe, Operaciones Compuestas, Anulacion, Cuentas
-   Origen/Destino).
+1. **Camino feliz**: una pregunta cuya respuesta esta en los documentos
+   institucionales del Hotel Bahia Serena (`data/`): politica de reservas,
+   reglamento interno, servicios y comodidades, protocolo de seguridad.
 2. **Pregunta trampa**: una pregunta sobre algo que los documentos no
    cubren. Verifica que el modelo conteste "no lo se" en vez de alucinar.
 
@@ -46,9 +46,9 @@ for ruidoso in ("httpx", "httpcore", "openai", "google_genai", "chromadb", "urll
 warnings.filterwarnings("ignore", category=UserWarning, module="langchain_google_genai")
 log = logging.getLogger("clase_3.demo")
 
-PREGUNTA_CAMINO_FELIZ = "¿Cuál es la fórmula del Ratio de Sharpe y qué representa cada término?"
+PREGUNTA_CAMINO_FELIZ = "¿Cuáles son los horarios de check-in y check-out, y cuánto cuesta un late check-out?"
 
-PREGUNTA_TRAMPA = "¿Qué tasa de interés cobra Alphinance por un préstamo personal?"
+PREGUNTA_TRAMPA = "¿El hotel ofrece servicio de guardería o cuidado de niños (kids club)?"
 
 
 def titulo(texto: str) -> None:
@@ -65,6 +65,8 @@ def mostrar(pregunta: str, resultado: RespuestaRAG) -> None:
             print(f"  - {ref.fuente}: {ref.fragmento!r}")
     else:
         print("Referencias: (ninguna)")
+    print("\nJSON (RespuestaRAG, Pydantic):")
+    print(resultado.model_dump_json(indent=2))
 
 
 async def demo_camino_feliz() -> None:
@@ -79,7 +81,7 @@ async def demo_camino_feliz() -> None:
 
 async def demo_pregunta_trampa() -> None:
     titulo("2. Pregunta trampa: no deberia estar en los documentos")
-    print("Los PRDs de Alphinance no hablan de prestamos personales; se espera 'no lo se'.\n")
+    print("Ningun documento del hotel menciona un servicio de guarderia/kids club; se espera 'no lo se'.\n")
     inicio = time.perf_counter()
     resultado = await get_rag_response(PREGUNTA_TRAMPA)
     print(f"-> {(time.perf_counter() - inicio) * 1000:.0f} ms\n")

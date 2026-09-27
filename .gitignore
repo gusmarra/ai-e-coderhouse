@@ -8,4 +8,5 @@ __pycache__/
 # ChromaDB persistido: se reconstruye con `python ingest.py` (ver README).
 vectorstore/
 # Entregas anteriores: viven en el repo pero fuera de esta entrega.
+entregas/
 

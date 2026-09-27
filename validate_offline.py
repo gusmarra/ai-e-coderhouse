@@ -101,7 +101,7 @@ def probar_chunking() -> None:
 def probar_schemas() -> None:
     titulo("2. Esquemas Pydantic")
 
-    valido = RespuestaModelo(respuesta="El Sharpe Ratio es (Rp - Rf) / sigma_p.", encontrado_en_contexto=True)
+    valido = RespuestaModelo(respuesta="El check-in es a partir de las 15:00 hs.", encontrado_en_contexto=True)
     check(valido.encontrado_en_contexto is True, "RespuestaModelo acepta una respuesta valida")
 
     sin_contexto = RespuestaModelo(respuesta=MENSAJE_SIN_CONTEXTO, encontrado_en_contexto=False)
@@ -119,7 +119,7 @@ def probar_schemas() -> None:
     except ValidationError:
         check(True, "RespuestaModelo rechaza campos extra (extra='forbid')")
 
-    ref = Referencia(fuente="ratio-de-sharpe.md", fragmento="Sharpe ratio = (Rp - Rf) / sigma_p")
+    ref = Referencia(fuente="politica-reservas-cancelaciones.md", fragmento="Check-in: a partir de las 15:00 hs.")
     rag = RespuestaRAG(respuesta="...", encontrado_en_contexto=True, referencias=[ref])
     check(len(rag.referencias) == 1, "RespuestaRAG agrupa respuesta + referencias")
 
@@ -152,17 +152,17 @@ def probar_referencias() -> None:
     titulo("4. Contexto y referencias a partir de Documents")
 
     documentos = [
-        Document(page_content="El Sharpe ratio se calcula como (Rp - Rf) / sigma_p.", metadata={"source": "ratio-de-sharpe.md"}),
-        Document(page_content="x" * 400, metadata={"source": "operaciones-compuestas.md"}),
+        Document(page_content="El check-in es a partir de las 15:00 hs y el check-out hasta las 11:00 hs.", metadata={"source": "politica-reservas-cancelaciones.md"}),
+        Document(page_content="x" * 400, metadata={"source": "reglamento-interno-huespedes.md"}),
     ]
 
     contexto = _formatear_contexto(documentos)
-    check("[Fuente: ratio-de-sharpe.md]" in contexto, "el contexto etiqueta cada chunk con su fuente")
-    check("[Fuente: operaciones-compuestas.md]" in contexto, "el contexto incluye todos los documentos recuperados")
+    check("[Fuente: politica-reservas-cancelaciones.md]" in contexto, "el contexto etiqueta cada chunk con su fuente")
+    check("[Fuente: reglamento-interno-huespedes.md]" in contexto, "el contexto incluye todos los documentos recuperados")
 
     referencias = _armar_referencias(documentos)
     check(len(referencias) == len(documentos), "se arma una Referencia por cada Document recuperado")
-    check(referencias[0].fuente == "ratio-de-sharpe.md", "la Referencia conserva el nombre del archivo original")
+    check(referencias[0].fuente == "politica-reservas-cancelaciones.md", "la Referencia conserva el nombre del archivo original")
     check(len(referencias[1].fragmento) < 400, "un chunk largo se recorta a un extracto en la Referencia")
 
     check(_formatear_contexto([]) != "", "el contexto vacio no rompe el formateo (retriever sin resultados)")
@@ -176,10 +176,10 @@ async def probar_generacion_lcel() -> None:
     titulo("5. Cadena LCEL (PROMPT | modelo | PydanticOutputParser) con modelo falso")
 
     modelo_falso = FakeListChatModel(
-        responses=['{"respuesta": "El Sharpe ratio es (Rp - Rf) / sigma_p.", "encontrado_en_contexto": true}']
+        responses=['{"respuesta": "El check-in es a partir de las 15:00 hs.", "encontrado_en_contexto": true}']
     )
     generacion = construir_generacion(modelo_falso)
-    resultado = await generacion.ainvoke({"contexto": "...", "pregunta": "¿Como se calcula el Sharpe ratio?"})
+    resultado = await generacion.ainvoke({"contexto": "...", "pregunta": "¿A que hora es el check-in?"})
     check(isinstance(resultado, RespuestaModelo), "el parser devuelve una instancia de RespuestaModelo")
     check(resultado.encontrado_en_contexto is True, "el JSON del modelo falso se parsea correctamente")
 
@@ -191,15 +191,15 @@ async def probar_get_rag_response() -> None:
     titulo("6. get_rag_response (retriever + generacion, ambos dobles de prueba)")
 
     documentos_falsos = [
-        Document(page_content="El Sharpe ratio es (Rp - Rf) / sigma_p.", metadata={"source": "ratio-de-sharpe.md"}),
-        Document(page_content="Rp es el retorno promedio diario de la cartera.", metadata={"source": "ratio-de-sharpe.md"}),
+        Document(page_content="El check-in es a partir de las 15:00 hs.", metadata={"source": "politica-reservas-cancelaciones.md"}),
+        Document(page_content="El check-out es hasta las 11:00 hs.", metadata={"source": "politica-reservas-cancelaciones.md"}),
     ]
     retriever_falso = RunnableLambda(lambda _pregunta: documentos_falsos)
 
     generacion_ok = RunnableLambda(
-        lambda _entrada: RespuestaModelo(respuesta="El Sharpe ratio es (Rp - Rf) / sigma_p.", encontrado_en_contexto=True)
+        lambda _entrada: RespuestaModelo(respuesta="El check-in es a partir de las 15:00 hs.", encontrado_en_contexto=True)
     )
-    resultado = await get_rag_response("¿Como se calcula el Sharpe ratio?", retriever=retriever_falso, generacion=generacion_ok)
+    resultado = await get_rag_response("¿A que hora es el check-in?", retriever=retriever_falso, generacion=generacion_ok)
     check(isinstance(resultado, RespuestaRAG), "get_rag_response devuelve un RespuestaRAG")
     check(resultado.encontrado_en_contexto is True, "propaga encontrado_en_contexto del modelo")
     check(len(resultado.referencias) == 2, "adjunta una referencia por cada Document recuperado")
@@ -208,7 +208,7 @@ async def probar_get_rag_response() -> None:
         lambda _entrada: RespuestaModelo(respuesta=MENSAJE_SIN_CONTEXTO, encontrado_en_contexto=False)
     )
     resultado_trampa = await get_rag_response(
-        "¿Cuanto cobra Alphinance de interes hipotecario?", retriever=retriever_falso, generacion=generacion_sin_contexto
+        "¿El hotel ofrece guarderia o kids club?", retriever=retriever_falso, generacion=generacion_sin_contexto
     )
     check(resultado_trampa.respuesta == MENSAJE_SIN_CONTEXTO, "una pregunta trampa devuelve el mensaje fijo de 'no lo se'")
 

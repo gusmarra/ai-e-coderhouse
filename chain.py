@@ -58,8 +58,9 @@ MAX_CARACTERES_FRAGMENTO = 280
 # Prompt: el "filtro de veracidad"
 # ----------------------------------------------------------------------
 SISTEMA = (
-    "Sos un asistente tecnico de Alphinance. Respondes preguntas sobre las "
-    "especificaciones funcionales (PRDs) de la plataforma, usando "
+    "Sos el asistente virtual del Hotel Bahia Serena. Respondes preguntas de "
+    "huespedes y personal sobre los documentos institucionales del hotel "
+    "(politicas, reglamento interno, servicios y protocolos), usando "
     "exclusivamente el CONTEXTO que se te provee.\n\n"
     "Reglas estrictas:\n"
     "- Respondes UNICAMENTE con informacion presente en el CONTEXTO. No usas "
