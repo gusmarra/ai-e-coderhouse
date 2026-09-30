@@ -1,0 +1,18 @@
+[
+  {"pregunta": "¿Cuánto cuesta reponer una tarjeta magnética perdida o robada?", "documento_id_esperado": "protocolo-seguridad-emergencias"},
+  {"pregunta": "¿Qué se cobra si me quedo en la habitación después de las 18:00 hs del día de check-out?", "documento_id_esperado": "politica-reservas-cancelaciones"},
+  {"pregunta": "¿Cuántas mascotas puedo llevar por habitación y cuál es el peso máximo?", "documento_id_esperado": "reglamento-interno-huespedes"},
+  {"pregunta": "¿A qué hora abre el spa y cómo se reserva un turno?", "documento_id_esperado": "servicios-comodidades"},
+  {"pregunta": "¿Dónde está el DEA y quién sabe usarlo?", "documento_id_esperado": "protocolo-seguridad-emergencias"},
+  {"pregunta": "¿Cuánto se cobra si alguien fuma dentro de una habitación?", "documento_id_esperado": "reglamento-interno-huespedes"},
+  {"pregunta": "¿Qué velocidad tiene el wifi y para qué sirve la red Business?", "documento_id_esperado": "servicios-comodidades"},
+  {"pregunta": "¿En cuántos días hábiles se devuelve el dinero de una cancelación y qué pasa con las reservas de una OTA?", "documento_id_esperado": "politica-reservas-cancelaciones"},
+  {"pregunta": "¿Cuántos días se conservan las grabaciones de las cámaras?", "documento_id_esperado": "protocolo-seguridad-emergencias"},
+  {"pregunta": "¿Cuánto cuesta el valet parking por día?", "documento_id_esperado": "servicios-comodidades"},
+  {"pregunta": "¿Qué es el PMS?", "documento_id_esperado": "politica-reservas-cancelaciones"},
+  {"pregunta": "¿Se pueden usar anafes en las habitaciones?", "documento_id_esperado": "reglamento-interno-huespedes"},
+  {"pregunta": "¿Por qué concepto se cobran $15.000 por estadía?", "documento_id_esperado": "reglamento-interno-huespedes"},
+  {"pregunta": "¿Qué número de teléfono interno uso para llamar a la central de seguridad?", "documento_id_esperado": "protocolo-seguridad-emergencias"},
+  {"pregunta": "¿Dónde queda el punto de encuentro de calle Costanera?", "documento_id_esperado": "protocolo-seguridad-emergencias"},
+  {"pregunta": "¿Cada cuánto sale el shuttle al aeropuerto?", "documento_id_esperado": "servicios-comodidades"}
+]

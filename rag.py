@@ -1,8 +1,8 @@
-"""Cadena RAG asincrona: retriever de ChromaDB + generacion grounded con LCEL.
+"""Cadena RAG asincrona: recuperador hibrido (Pinecone + BM25) + generacion grounded con LCEL.
 
 El flujo es::
 
-    documentos = await retriever.ainvoke(pregunta)     # ChromaDB, top_k fragmentos
+    documentos = await retriever.ainvoke(pregunta)     # RAGSystem: top-5 hibrido
     contexto   = _formatear_contexto(documentos)        # cada chunk con su fuente
     modelo_out = await (PROMPT | modelo | parser).ainvoke({...})  # LCEL
     resultado  = RespuestaRAG(..., referencias=_armar_referencias(documentos))
@@ -20,6 +20,7 @@ partes y devuelve un `RespuestaRAG` ya validado.
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import Any
 
 from langchain_core.documents import Document
@@ -27,10 +28,9 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
-from langchain_core.vectorstores import VectorStoreRetriever
 
-from ingest import ingerir
 from llm import crear_modelo
+from retriever import TOP_K, RAGSystem
 from schemas import Referencia, RespuestaModelo, RespuestaRAG
 
 __all__ = [
@@ -39,15 +39,10 @@ __all__ = [
     "TOP_K",
     "construir_generacion",
     "get_rag_response",
-    "retriever_por_defecto",
+    "rag_system_por_defecto",
 ]
 
-log = logging.getLogger("clase_3.rag")
-
-#: Entre 3 y 5, como pide la consigna: mas fragmentos no mejora la respuesta,
-#: satura el contexto ("contexto infinito") y degrada la atencion del modelo
-#: (lost in the middle) ademas de acercarse al limite de tokens.
-TOP_K = 4
+log = logging.getLogger("pre_entrega_4.rag")
 
 #: El fragmento que viaja en cada `Referencia` es un preview para citar, no
 #: el chunk entero (eso ya esta en el contexto que vio el modelo).
@@ -89,9 +84,10 @@ PROMPT: ChatPromptTemplate = ChatPromptTemplate.from_messages(
 # ----------------------------------------------------------------------
 # Retriever y contexto
 # ----------------------------------------------------------------------
-def retriever_por_defecto(*, top_k: int = TOP_K) -> VectorStoreRetriever:
-    """Abre (o puebla, si esta vacia) la coleccion de ChromaDB y devuelve su retriever."""
-    return ingerir().as_retriever(search_kwargs={"k": top_k})
+@lru_cache(maxsize=1)
+def rag_system_por_defecto() -> RAGSystem:
+    """Recuperador hibrido sobre el indice de Pinecone del `.env` (se arma una sola vez por proceso)."""
+    return RAGSystem.desde_entorno()
 
 
 def _formatear_contexto(documentos: list[Document]) -> str:
@@ -110,6 +106,7 @@ def _armar_referencias(documentos: list[Document]) -> list[Referencia]:
     return [
         Referencia(
             fuente=doc.metadata.get("source", "desconocida"),
+            seccion=doc.metadata.get("seccion") or None,
             fragmento=(
                 doc.page_content[:MAX_CARACTERES_FRAGMENTO] + "..."
                 if len(doc.page_content) > MAX_CARACTERES_FRAGMENTO
@@ -145,12 +142,12 @@ def _generacion_por_defecto() -> Runnable[dict[str, Any], RespuestaModelo]:
 async def get_rag_response(
     query: str,
     *,
-    retriever: VectorStoreRetriever | Runnable[str, list[Document]] | None = None,
+    retriever: RAGSystem | Runnable[str, list[Document]] | None = None,
     generacion: Runnable[dict[str, Any], RespuestaModelo] | None = None,
 ) -> RespuestaRAG:
-    """Busca en ChromaDB, genera una respuesta grounded y la devuelve validada.
+    """Busca con el recuperador hibrido, genera una respuesta grounded y la devuelve validada.
 
-    1. Recupera los `TOP_K` fragmentos mas similares a `query` (async).
+    1. Recupera los `TOP_K` (5) fragmentos mas relevantes a `query` (async).
     2. Arma el contexto y llama a la cadena `PROMPT | modelo | parser`.
     3. Adjunta las referencias reales (fuente + extracto de cada chunk).
 
@@ -160,7 +157,7 @@ async def get_rag_response(
         raise ValueError("la consulta esta vacia")
 
     pregunta = query.strip()
-    retriever = retriever if retriever is not None else retriever_por_defecto()
+    retriever = retriever if retriever is not None else rag_system_por_defecto()
     generacion = generacion if generacion is not None else _generacion_por_defecto()
 
     log.info("consulta: %r", pregunta)

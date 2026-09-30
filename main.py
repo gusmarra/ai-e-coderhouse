@@ -1,119 +1,70 @@
-"""Mini script de prueba del pipeline RAG, contra la API real.
-
-Corre dos demos, tal como pide la consigna:
-
-1. **Camino feliz**: una pregunta cuya respuesta esta en los documentos
-   institucionales del Hotel Bahia Serena (`data/`): politica de reservas,
-   reglamento interno, servicios y comodidades, protocolo de seguridad.
-2. **Pregunta trampa**: una pregunta sobre algo que los documentos no
-   cubren. Verifica que el modelo conteste "no lo se" en vez de alucinar.
-
-La primera corrida ademas puebla `./vectorstore` (ingesta); las siguientes
-reabren la coleccion existente sin volver a embeber nada.
+"""Demo del recuperador hibrido contra Pinecone (y, opcionalmente, generacion con LLM).
 
 Uso::
 
-    cp .env.example .env      # y completar GEMINI_API_KEY (u OPENAI_API_KEY)
-    pip install -r requirements.txt
-    python main.py             # ingesta (si hace falta) + las dos demos
-    python main.py --forzar    # reindexa data/ desde cero antes de correr
+    python main.py                                   # pregunta de ejemplo
+    python main.py "¿Cuánto cuesta el valet parking?"
+    python main.py "¿Dónde está el DEA?" --categoria seguridad   # filtro por metadata
+    python main.py "..." --generar                   # ademas redacta la respuesta con el LLM
+
+Requiere haber corrido antes `python ingest.py` (ver README).
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import sys
-import time
 import warnings
 
-from dotenv import load_dotenv
-
-from rag import get_rag_response
-from ingest import ingerir
-from llm import proveedores_disponibles
+from retriever import RAGSystem
 from schemas import RespuestaRAG
 
-# En consolas Windows (cp1252) un acento en la respuesta del modelo haria
-# fallar el print; con errors="replace" el script nunca muere por eso.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)-8s %(name)s: %(message)s")
-logging.getLogger("clase_3").setLevel(logging.INFO)
-for ruidoso in ("httpx", "httpcore", "openai", "google_genai", "chromadb", "urllib3"):
+for ruidoso in ("httpx", "httpcore", "openai", "google_genai", "urllib3"):
     logging.getLogger(ruidoso).setLevel(logging.ERROR)
 warnings.filterwarnings("ignore", category=UserWarning, module="langchain_google_genai")
-log = logging.getLogger("clase_3.demo")
 
-PREGUNTA_CAMINO_FELIZ = "¿Cuáles son los horarios de check-in y check-out, y cuánto cuesta un late check-out?"
-
-PREGUNTA_TRAMPA = "¿El hotel ofrece servicio de guardería o cuidado de niños (kids club)?"
+PREGUNTA_EJEMPLO = "¿Cuáles son los horarios de check-in y check-out, y cuánto cuesta un late check-out?"
 
 
-def titulo(texto: str) -> None:
-    print(f"\n{'=' * 72}\n{texto}\n{'=' * 72}")
+def mostrar_recuperados(rag: RAGSystem, pregunta: str, categoria: str | None) -> None:
+    print(f"\nPregunta: {pregunta}" + (f"  [categoria={categoria}]" if categoria else ""))
+    print(f"Top-{rag.top_k} (BM25 + vectorial):")
+    for i, doc in enumerate(rag.retrieve(pregunta, categoria=categoria), start=1):
+        m = doc.metadata
+        print(f"  {i}. {m.get('source')} · {m.get('seccion')} · {m.get('categoria')}")
+        print(f"     {doc.page_content[:110].strip()!r}...")
 
 
-def mostrar(pregunta: str, resultado: RespuestaRAG) -> None:
-    print(f"Pregunta: {pregunta}")
+def mostrar_respuesta(resultado: RespuestaRAG) -> None:
+    print(f"\nRespuesta: {resultado.respuesta}")
     print(f"Encontrado en contexto: {resultado.encontrado_en_contexto}")
-    print(f"Respuesta: {resultado.respuesta}")
-    if resultado.referencias:
-        print("Referencias:")
-        for ref in resultado.referencias:
-            print(f"  - {ref.fuente}: {ref.fragmento!r}")
-    else:
-        print("Referencias: (ninguna)")
-    print("\nJSON (RespuestaRAG, Pydantic):")
-    print(resultado.model_dump_json(indent=2))
 
 
-async def demo_camino_feliz() -> None:
-    titulo("1. Camino feliz: la respuesta esta en los documentos")
-    inicio = time.perf_counter()
-    resultado = await get_rag_response(PREGUNTA_CAMINO_FELIZ)
-    print(f"-> {(time.perf_counter() - inicio) * 1000:.0f} ms\n")
-    mostrar(PREGUNTA_CAMINO_FELIZ, resultado)
-    if not resultado.encontrado_en_contexto:
-        log.warning("se esperaba encontrado_en_contexto=True: revisar la ingesta o el top_k")
+async def generar(pregunta: str, rag: RAGSystem) -> RespuestaRAG:
+    from rag import get_rag_response
+
+    return await get_rag_response(pregunta, retriever=rag)
 
 
-async def demo_pregunta_trampa() -> None:
-    titulo("2. Pregunta trampa: no deberia estar en los documentos")
-    print("Ningun documento del hotel menciona un servicio de guarderia/kids club; se espera 'no lo se'.\n")
-    inicio = time.perf_counter()
-    resultado = await get_rag_response(PREGUNTA_TRAMPA)
-    print(f"-> {(time.perf_counter() - inicio) * 1000:.0f} ms\n")
-    mostrar(PREGUNTA_TRAMPA, resultado)
-    if resultado.encontrado_en_contexto:
-        log.warning("el modelo afirmo tener la respuesta: posible alucinacion, revisar el prompt")
-    else:
-        print("\n-> correcto: el modelo no alucino una respuesta que no esta en los documentos.")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Consulta al recuperador hibrido")
+    parser.add_argument("pregunta", nargs="?", default=PREGUNTA_EJEMPLO)
+    parser.add_argument("--categoria", help="filtra por metadata: reservas | reglamento | servicios | seguridad")
+    parser.add_argument("--generar", action="store_true", help="redacta la respuesta con el LLM (gasta cuota)")
+    args = parser.parse_args()
 
-
-async def main() -> int:
-    load_dotenv()
-
-    disponibles = proveedores_disponibles()
-    if not disponibles:
-        print("No hay ninguna API key en el entorno. Copia .env.example a .env y completala.")
-        print("Para probar la maquinaria sin red: python validate_offline.py")
-        return 1
-    print(f"Proveedores con key: {', '.join(disponibles)}")
-
-    titulo("0. Ingesta (solo reindexa si vectorstore/ esta vacio o se paso --forzar)")
-    ingerir(forzar="--forzar" in sys.argv[1:])
-
-    for demo in (demo_camino_feliz, demo_pregunta_trampa):
-        try:
-            await demo()
-        except Exception as exc:  # una demo que falla no deberia cortar el resto
-            log.error("la demo %s fallo: %s: %s", demo.__name__, type(exc).__name__, exc)
-
-    titulo("Listo")
+    rag = RAGSystem.desde_entorno()
+    mostrar_recuperados(rag, args.pregunta, args.categoria)
+    if args.generar:
+        mostrar_respuesta(asyncio.run(generar(args.pregunta, rag)))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(main())

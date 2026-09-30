@@ -1,13 +1,15 @@
 [project]
-name = "rag-hotel-bahia-serena"
-version = "1.0.0"
-description = "RAG end-to-end (ChromaDB + LCEL + Pydantic) sobre los documentos institucionales del Hotel Bahia Serena"
+name = "rag-hibrido-pinecone-hotel-bahia-serena"
+version = "2.0.0"
+description = "RAG escalable en la nube: ingesta a Pinecone Serverless, recuperador hibrido (BM25 + vectorial) y evaluacion con Precision@k / Recall@k"
 requires-python = ">=3.12"
 dependencies = [
     "langchain-core>=0.3.60",
+    "langchain-classic>=1.0",
+    "langchain-community>=0.3",
     "langchain-text-splitters>=0.3",
-    "langchain-chroma>=0.2",
-    "chromadb>=0.5",
+    "pinecone>=7.0",
+    "rank-bm25>=0.2.2",
     "pydantic>=2.9,<3",
     "python-dotenv>=1.0",
 ]
@@ -16,9 +18,19 @@ dependencies = [
 openai = ["langchain-openai>=0.3"]
 gemini = ["langchain-google-genai>=2.1"]
 all = ["langchain-openai>=0.3", "langchain-google-genai>=2.1"]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+filterwarnings = [
+    # langchain-community anuncia su "sunset"; BM25Retriever sigue viviendo ahi.
+    "ignore:.*langchain-community.*:DeprecationWarning",
+]
 
 [tool.ruff]
-line-length = 100
+line-length = 110
 target-version = "py312"
 
 [tool.ruff.lint]

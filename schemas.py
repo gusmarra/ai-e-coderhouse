@@ -11,8 +11,8 @@ Se separan dos modelos a proposito:
   devuelve el LLM.
 * `RespuestaRAG` es la salida final que ve `get_rag_response()`: la
   respuesta ya validada mas las referencias, que el propio retriever arma a
-  partir de los metadatos de los chunks efectivamente recuperados en
-  ChromaDB (ver `rag.py::_armar_referencias`).
+  partir de los metadatos de los chunks efectivamente recuperados por
+  el recuperador hibrido (ver `rag.py::_armar_referencias`).
 """
 
 from __future__ import annotations
@@ -52,12 +52,13 @@ class RespuestaModelo(BaseModel):
 
 
 class Referencia(BaseModel):
-    """Un fragmento efectivamente recuperado por ChromaDB (no redactado por el LLM)."""
+    """Un fragmento efectivamente recuperado por el retriever (no redactado por el LLM)."""
 
     model_config = ConfigDict(extra="forbid")
 
     fuente: str = Field(description="Nombre del archivo de origen del fragmento.")
     fragmento: str = Field(description="Extracto del chunk usado como contexto.")
+    seccion: str | None = Field(default=None, description="Seccion del documento de la que sale el chunk.")
 
 
 class RespuestaRAG(BaseModel):

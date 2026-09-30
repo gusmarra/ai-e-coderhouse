@@ -1,12 +1,18 @@
-# Nucleo de la cadena RAG: Runnables, ChatPromptTemplate, PydanticOutputParser.
+# Nucleo de LangChain: Runnables, prompts, parsers y splitter.
 langchain-core>=0.3.60
+langchain-text-splitters>=0.3
 pydantic>=2.9,<3
 python-dotenv>=1.0
 
-# Chunking y base vectorial.
-langchain-text-splitters>=0.3
-langchain-chroma>=0.2
-chromadb>=0.5
+# Recuperador hibrido: EnsembleRetriever (langchain-classic) + BM25Retriever
+# (langchain-community, en modo "sunset" pero sin reemplazo oficial) + rank-bm25.
+langchain-classic>=1.0
+langchain-community>=0.3
+rank-bm25>=0.2.2
+
+# Base vectorial: SDK nativo de Pinecone (langchain-pinecone no publica versiones
+# para Python 3.14; el SDK nativo funciona en cualquier version soportada).
+pinecone>=7.0
 
 # Integraciones de modelo (chat + embeddings). Alcanza con instalar la del
 # proveedor que se vaya a usar: llm.py las importa a demanda.

@@ -1,6 +1,9 @@
 """Factory de modelos: mismo patron que las entregas anteriores (`crear_modelo`
-del Modulo 1 y 2), ahora con dos familias de modelo: chat (generacion) y
+del Modulo 1 y 2), con dos familias de modelo: chat (generacion) y
 embeddings (indexado de `data/` + consulta del usuario).
+
+Pre-entrega 4: los embeddings salen siempre con `EMBEDDING_DIMENSION`
+(1536) dimensiones, que es lo que espera el indice de Pinecone.
 
 El punto critico de un RAG es que el modelo de embeddings que indexa los
 documentos tiene que ser exactamente el mismo que el que embebe la pregunta
@@ -27,8 +30,12 @@ from typing import Any
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 
+from config import EMBEDDING_DIMENSION
+
 __all__ = [
+    "EmbeddingsConCache",
     "crear_embeddings",
+    "embeddings_por_defecto",
     "crear_modelo",
     "proveedores_disponibles",
 ]
@@ -53,6 +60,9 @@ _PROVEEDORES_EMBEDDINGS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
         "models/gemini-embedding-001",
     ),
 }
+
+#: Nombre del parametro con el que cada proveedor acepta la dimension de salida.
+_PARAM_DIMENSION = {"openai": "dimensions", "gemini": "output_dimensionality"}
 
 #: alias: LangChain llama "google" a lo que aca (y en el Modulo 1) se llama "gemini".
 _ALIAS = {"google": "gemini", "google_genai": "gemini", "openai_chat": "openai"}
@@ -118,10 +128,31 @@ def crear_embeddings(
     paquete, clase, _, por_defecto = _PROVEEDORES_EMBEDDINGS[elegido]
     cls = getattr(import_module(paquete), clase)
     nombre_modelo = modelo or os.getenv("EMBEDDING_MODEL") or por_defecto
+    kwargs.setdefault(_PARAM_DIMENSION[elegido], EMBEDDING_DIMENSION)
     return cls(model=nombre_modelo, **kwargs)
+
+
+class EmbeddingsConCache(Embeddings):
+    """Memoiza `embed_query`: la misma pregunta no se embebe dos veces.
+
+    Importa en `evaluate.py`, que consulta cada pregunta con el recuperador
+    vectorial y con el hibrido: sin cache seria el doble de llamadas a la API.
+    """
+
+    def __init__(self, base: Embeddings) -> None:
+        self._base = base
+        self._cache: dict[str, list[float]] = {}
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._base.embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        if text not in self._cache:
+            self._cache[text] = self._base.embed_query(text)
+        return self._cache[text]
 
 
 @lru_cache(maxsize=1)
 def embeddings_por_defecto() -> Embeddings:
     """Instancia compartida del proceso: evita recrear el cliente en cada llamada."""
-    return crear_embeddings()
+    return EmbeddingsConCache(crear_embeddings())
