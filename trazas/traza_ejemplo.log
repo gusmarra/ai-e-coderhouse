@@ -1,0 +1,30 @@
+=== thread_id=demo-multipaso ===
+
+Usuario: ¿Cuántos pedidos tuvo Laura Gómez y cuál fue el total?
+  ACCION      buscar_cliente({'nombre': 'Laura Gomez'})
+  OBSERVACION {"cantidad": 1, "coincidencias": [{"cliente_id": 102, "nombre": "Laura Gómez"}]}
+  ACCION      buscar_pedidos({'cliente_id': 102})
+  OBSERVACION {"cliente_id": 102, "cliente": "Laura Gómez", "cantidad_pedidos": 3, "total": 14500, "pedidos": [{"id": 5001, "fecha": "2026-08-03", "total": 4200, "estado": "entregado"}, {"id": 5002, "fecha": "2026-08-21", "total": 6300, "estado": "entregado"}, {"id": 5003, "fecha": "2026-09-18", "total": 4000, "estado": "en camino"}]}
+  RESPUESTA   Laura Gómez tuvo 3 pedidos y el total gastado fue de $14.500.
+
+Usuario: ¿Y el último?
+  ACCION      buscar_pedidos({'cliente_id': 102})
+  OBSERVACION {"cliente_id": 102, "cliente": "Laura Gómez", "cantidad_pedidos": 3, "total": 14500, "pedidos": [{"id": 5001, "fecha": "2026-08-03", "total": 4200, "estado": "entregado"}, {"id": 5002, "fecha": "2026-08-21", "total": 6300, "estado": "entregado"}, {"id": 5003, "fecha": "2026-09-18", "total": 4000, "estado": "en camino"}]}
+  RESPUESTA   El último pedido fue el N° 5003, realizado el 18/09/2026 por $4.000, y su estado actual es "en camino".
+
+  ... se cierra el checkpointer y se reabre el archivo (reinicio simulado) ...
+
+Usuario: Cambiando de tema un segundo: ¿de qué clienta estábamos hablando y cuánto era su total?
+  RESPUESTA   Estábamos hablando de Laura Gómez, y su total gastado es de $14.500.
+
+=== thread_id=demo-errores ===
+
+Usuario: ¿Cuántos pedidos tuvo el cliente 999?
+  ACCION      buscar_pedidos({'cliente_id': 999})
+  OBSERVACION {"error": "No existe un cliente con id 999.", "sugerencia": "Si tenes el nombre del cliente, buscalo con buscar_cliente."} [ERROR]
+  RESPUESTA   No encontré ningún cliente con el ID 999. ¿Tenés el nombre o apellido del cliente para que lo busque?
+
+Usuario: Pasame los pedidos de García
+  ACCION      buscar_cliente({'nombre': 'Garcia'})
+  OBSERVACION {"cantidad": 2, "coincidencias": [{"cliente_id": 103, "nombre": "Carlos García"}, {"cliente_id": 104, "nombre": "María García"}]}
+  RESPUESTA   Encontré dos clientes con ese apellido: Carlos García (ID 103) y María García (ID 104). ¿A cuál de los dos te referís?

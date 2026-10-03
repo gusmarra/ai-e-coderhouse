@@ -1,206 +1,140 @@
-# RAG escalable en la nube: Pinecone + recuperador híbrido (BM25 + vectorial)
+# Pre-entrega 5 — Agente de razonamiento cíclico con memoria persistente
 
-Pre-entrega 4. Sobre los 4 documentos institucionales del Hotel Bahía Serena
-(`data/`), este repo:
+Agente **ReAct** (Reason + Act) construido con **LangGraph**: un LLM que decide por sí
+mismo cuándo llamar a una herramienta, observa el resultado, y vuelve a razonar hasta tener
+la respuesta. El estado de cada conversación se guarda en **SQLite** (`AsyncSqliteSaver`),
+así que con el mismo `thread_id` el agente recuerda lo hablado, incluso después de
+reiniciar el proceso.
 
-1. **Ingesta** los documentos a un índice **Pinecone Serverless**, con el texto
-   original y metadatos avanzados dentro de cada vector.
-2. **Recupera** con un `RAGSystem` que combina búsqueda vectorial (Pinecone) y
-   léxica (**BM25**) mediante un `EnsembleRetriever`, y devuelve el top-5.
-3. **Evalúa** el recuperador con un *golden set* midiendo **Precision@k** y
-   **Recall@k**.
+El dominio es una base simulada de **clientes y pedidos** (la del ejemplo de la consigna).
 
-La generación de la respuesta final (LCEL + Pydantic, entrega anterior) sigue
-disponible: `python main.py "..." --generar`. El backup completo de la entrega 3
-(ChromaDB) está en `entregas/clase_3/`.
+## Cómo levantar el entorno
+
+Requiere **Python 3.12+** (el CI corre 3.12 y 3.13; se desarrolló en 3.14).
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env              # y completar GEMINI_API_KEY (u OPENAI_API_KEY)
+```
+
+> Las API keys viven **solo** en `.env`, que está en `.gitignore`. Nunca se suben.
+
+```bash
+python main.py demo                                   # corre los escenarios y escribe trazas/
+python main.py preguntar "¿Cuántos pedidos tuvo Laura Gómez?" --thread-id ana
+python main.py preguntar "¿Y el último?" --thread-id ana   # mismo thread: recuerda a Laura
+python main.py chat --thread-id ana                   # conversación interactiva
+```
+
+Tests (offline: usan un LLM guionado, no necesitan red ni keys):
+
+```bash
+pip install -r requirements-dev.txt
+pytest && ruff check . && mypy *.py tests
+```
+
+> **Free tier de Gemini:** corta a ~5 requests por minuto y 20 por día *por modelo*. Definí
+> `LLM_RPM=4` en `.env` para que un rate limiter espacie las llamadas, y si un modelo se
+> agota probá otro con `LLM_MODEL=gemini-3.5-flash-lite` (la cuota es por modelo).
 
 ## Estructura
 
 | Archivo | Rol |
-| --- | --- |
-| [config.py](config.py) | Variables de entorno, dimensión (1536) y métrica del índice |
-| [setup_pinecone.py](setup_pinecone.py) | Crea el índice serverless si no existe; rechaza uno con otra dimensión |
-| [ingest.py](ingest.py) | `data/*.md` → chunks → embeddings → `upsert` a Pinecone (texto + metadata) |
-| [retriever.py](retriever.py) | `PineconeVectorRetriever` y `RAGSystem` (`EnsembleRetriever` BM25 + vectorial) |
-| [evaluate.py](evaluate.py) + [golden_set.json](golden_set.json) | Precision@k / Recall@k sobre 16 preguntas con documento esperado |
-| [rag.py](rag.py), [schemas.py](schemas.py), [main.py](main.py) | Generación grounded con citas + demo por consola |
-| [tests/](tests/) | Suite `pytest` offline (sin red ni API keys) |
+|---|---|
+| `herramientas.py` | **Fase 1.** Dos tools con `@tool`: `buscar_cliente` y `buscar_pedidos` (async, con errores accionables). |
+| `grafo.py` | **Fases 2 y 3.** `EstadoAgente(MessagesState)`, nodo `modelo`, `ToolNode`, `tools_condition` y el checkpointer. |
+| `trazas.py` | Corre un turno con `recursion_limit` y reconstruye la traza Pensamiento → Acción → Observación → Respuesta. |
+| `demo.py` | Escenarios reproducibles que generan `trazas/traza_ejemplo.{json,log}`. |
+| `llm.py`, `config.py` | Factory del modelo (Gemini/OpenAI), `.env`, límites. |
+| `main.py` | CLI: `demo`, `preguntar`, `chat`. |
+| `tests/` | 15 tests offline: herramientas, ciclo ReAct, reintento tras error, memoria, `recursion_limit`. |
 
-## Replicar el índice
+## Criterios de aceptación → dónde se cumplen
 
-Requiere Python ≥ 3.12, una cuenta de Pinecone (el plan gratuito alcanza) y una
-key de Gemini **o** de OpenAI.
+| Criterio | Cómo |
+|---|---|
+| **Autonomía** (sin `if/else` manual) | La ruta la decide `tools_condition` leyendo si el último `AIMessage` trae `tool_calls`. No hay ningún `if` en el código que elija herramientas. |
+| **Ciclo de retorno** | La arista `tools → modelo` devuelve el resultado (también los errores) al LLM. Test: `test_ciclo_de_retorno_el_error_vuelve_al_modelo_que_reintenta`. En la traza real, ante un id inexistente o un apellido ambiguo el agente **pide aclaraciones**. |
+| **Resiliencia de estado** | `AsyncSqliteSaver` + `thread_id`. La demo cierra y reabre el archivo SQLite entre preguntas del mismo thread. |
+| **Código limpio** | Python ≥ 3.12, type hints (`mypy` sin errores), `asyncio` de punta a punta, `ruff` limpio. |
 
-```bash
-# 1. Entorno
-python -m venv .venv
-.venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
+## Traza de ejecución (ciclo ReAct real)
 
-# 2. Variables: copiar la plantilla y completar PINECONE_API_KEY + la key del proveedor
-cp .env.example .env
+Generada con `gemini-3.5-flash-lite`; completa en [`trazas/traza_ejemplo.log`](trazas/traza_ejemplo.log)
+y [`trazas/traza_ejemplo.json`](trazas/traza_ejemplo.json).
+
+```text
+=== thread_id=demo-multipaso ===
+
+Usuario: ¿Cuántos pedidos tuvo Laura Gómez y cuál fue el total?
+  ACCION      buscar_cliente({'nombre': 'Laura Gomez'})
+  OBSERVACION {"cantidad": 1, "coincidencias": [{"cliente_id": 102, "nombre": "Laura Gómez"}]}
+  ACCION      buscar_pedidos({'cliente_id': 102})
+  OBSERVACION {"cliente_id": 102, "cliente": "Laura Gómez", "cantidad_pedidos": 3, "total": 14500, ...}
+  RESPUESTA   Laura Gómez tuvo 3 pedidos y el total gastado fue de $14.500.
+
+Usuario: ¿Y el último?
+  ACCION      buscar_pedidos({'cliente_id': 102})
+  RESPUESTA   El último pedido fue el N° 5003, realizado el 18/09/2026 por $4.000, y su estado actual es "en camino".
+
+  ... se cierra el checkpointer y se reabre el archivo (reinicio simulado) ...
+
+Usuario: Cambiando de tema un segundo: ¿de qué clienta estábamos hablando y cuánto era su total?
+  RESPUESTA   Estábamos hablando de Laura Gómez, y su total gastado es de $14.500.
+
+=== thread_id=demo-errores ===
+
+Usuario: ¿Cuántos pedidos tuvo el cliente 999?
+  ACCION      buscar_pedidos({'cliente_id': 999})
+  OBSERVACION {"error": "No existe un cliente con id 999.", ...} [ERROR]
+  RESPUESTA   No encontré ningún cliente con el ID 999. ¿Tenés el nombre o apellido del cliente para que lo busque?
 ```
 
-`.env` (nunca se sube: está en `.gitignore`):
+La primera pregunta usa la herramienta **dos veces** (razonamiento multi-paso): el agente
+necesita el `cliente_id`, por eso primero busca por nombre y recién después consulta los pedidos.
+Las respuestas de un LLM no son deterministas: otra corrida puede variar el orden o la redacción.
 
-```
-PINECONE_API_KEY=...             # console.pinecone.io -> API Keys
-INDEX_NAME=hotel-bahia-serena    # nombre del índice serverless
-LLM_PROVIDER=gemini              # o openai
-GEMINI_API_KEY=...               # u OPENAI_API_KEY
-```
+## Cómo funciona, paso a paso
 
-```bash
-# 3. Crear el índice (idempotente: si existe lo reutiliza)
-python setup_pinecone.py
+**1. El contrato de herramientas (`herramientas.py`).** Una tool es una función con `@tool`.
+El LLM nunca ve el código: solo el nombre, los tipos de los parámetros y el *docstring*. Por eso
+cada docstring dice *cuándo* usarla, *qué devuelve* y *qué hacer si falla*. Si el agente no usa
+la herramienta esperada, el problema casi siempre está ahí, no en el grafo.
 
-# 4. Ingestar (idempotente: los ids de chunk son deterministas, re-correr pisa, no duplica)
-python ingest.py                 # --reset vacía el namespace antes de subir
+**2. El estado (`EstadoAgente`).** Hereda de `MessagesState`, que ya trae
+`messages: Annotated[list[AnyMessage], add_messages]`. El *reducer* `add_messages` hace que un
+nodo **agregue** mensajes en vez de pisar la lista (hace lo que `operator.add`, y además
+actualiza por id). Un nodo devuelve solo lo nuevo: `{"messages": [respuesta]}`.
 
-# 5. Consultar y evaluar
-python main.py "¿Cuánto cuesta el valet parking?"
-python main.py "¿Dónde está el DEA?" --categoria seguridad   # filtro por metadata
-python evaluate.py               # imprime el reporte en consola
-```
+**3. El grafo (`construir_grafo`).**
 
-`ingest.py` ya llama a `setup_pinecone`, así que el paso 3 es opcional: existe
-para poder verificar la infraestructura por separado. El índice se crea como
-`ServerlessSpec(cloud="aws", region="us-east-1")` (la única región del plan
-gratuito; se cambia con `PINECONE_CLOUD` / `PINECONE_REGION`), dimensión **1536**
-y métrica **coseno**.
-
-## Cómo funciona
-
-```
-data/*.md ─► ingest.py ──► embeddings (1536 d) ──► Pinecone  namespace=hotel-bahia-serena
-             (chunks + metadata)                      vector + metadata{text, source, ...}
-                                                              │
-pregunta ─► RAGSystem.retrieve() ─┬─► BM25Retriever (memoria, mismos chunks) ──┐
-                                  └─► PineconeVectorRetriever ─────────────────┤
-                                                          EnsembleRetriever (RRF, id_key=chunk_id)
-                                                                               ▼
-                                                                         top-5 chunks
+```text
+START → modelo ──(tools_condition)──→ tools
+          ↑                              │
+          └──────────────────────────────┘
+          └─(sin tool_calls)→ END
 ```
 
-**Metadata de cada vector** (todo dentro de Pinecone, sin base relacional aparte):
+`modelo` llama al LLM con `llm.bind_tools(...)`. `tools_condition` lee el último mensaje: si
+pidió herramientas va a `tools` (un `ToolNode` que las ejecuta y agrega `ToolMessage`s), si no
+termina. El ciclo `tools → modelo` es lo que hace "cíclico" al agente.
 
-| campo | ejemplo | uso |
-| --- | --- | --- |
-| `text` | `"Late check-out: hasta las 13:00..."` | contenido del chunk |
-| `source` / `doc_id` | `politica-reservas-cancelaciones.md` / `politica-reservas-cancelaciones` | cita / id estable |
-| `categoria` | `reservas` · `reglamento` · `servicios` · `seguridad` | filtro `{"categoria": {"$eq": ...}}` |
-| `etiquetas` | `["check-in", "cancelacion", ...]` | filtro por lista |
-| `page`, `seccion` | `1`, `3. Check-in y check-out` | ubicación (los `.md` no tienen páginas: `page` es siempre 1; `seccion` es la que aporta precisión) |
-| `chunk_index`, `chunk_id` | `2`, `politica-...#002` | orden y **id del vector** |
+**4. La persistencia.** `graph.compile(checkpointer=AsyncSqliteSaver)` guarda el estado después
+de cada paso. Al invocar con `{"configurable": {"thread_id": "ana"}}`, LangGraph carga el estado
+de ese hilo y le *suma* el mensaje nuevo; otro `thread_id` arranca de cero. Usamos
+`AsyncSqliteSaver` y no `SqliteSaver` porque el agente es asíncrono (`ainvoke`/`astream`): el
+saver síncrono no soporta métodos async. Es el mismo almacenamiento SQLite, versión `aiosqlite`.
 
-**Decisiones de diseño**
+**5. Protecciones contra los errores comunes.**
 
-- **SDK nativo de Pinecone, no `langchain-pinecone`.** La consigna permite ambos;
-  `langchain-pinecone` no publica versiones para Python 3.14 (el del entorno de
-  desarrollo). `PineconeVectorRetriever` (~20 líneas en `retriever.py`) es el
-  adaptador a la interfaz `BaseRetriever` de LangChain, así que el
-  `EnsembleRetriever` lo consume igual.
-- **Chunking**: `RecursiveCharacterTextSplitter` de ~500 tokens con 50 de overlap,
-  cortando primero por encabezado `##`, luego párrafo y oración. Más chico pierde
-  contexto semántico; más grande diluye el embedding.
-- **Namespace**: todo el corpus vive en un namespace propio (`PINECONE_NAMESPACE`).
-  Una consulta solo mira los vectores de su namespace: en un sistema multi-inquilino,
-  un namespace por cliente evita resultados ruidosos y acelera la búsqueda.
-- **BM25 con tokenizador propio**: minúsculas, sin acentos ni puntuación y sin
-  stopwords en español (el default de `BM25Retriever` es `str.split`, con el que
-  `"check-in."` y `"Check-in"` serían términos distintos).
-- **Fusión**: Reciprocal Rank Fusion con pesos 0.5/0.5. Cada recuperador aporta
-  10 candidatos y `RAGSystem` se queda con los 5 mejores de la fusión. Los chunks
-  presentes en *ambas* listas suben, incluso por encima del rank 1 de una sola.
-- **Embeddings de 1536 dimensiones con ambos proveedores**: OpenAI
-  `text-embedding-3-small` es nativo; a Gemini se le pide
-  `output_dimensionality=1536`. Ojo: misma dimensión **no** significa mismo
-  espacio vectorial. Si cambiás de proveedor, reingestá con `--reset`.
-- **Consistencia eventual**: tras el `upsert`, `ingest.py` espera hasta que
-  `describe_index_stats` muestre todos los vectores; si no, una consulta inmediata
-  podría no verlos.
-
-**Límite de escala:** el BM25 de LangChain vive en memoria y se arma al iniciar
-desde los mismos chunks de `data/`. Es perfecto para cientos o miles de chunks; con
-millones, la parte léxica debería migrar a vectores *sparse* de Pinecone.
-
-## Evaluación
-
-`golden_set.json` tiene 16 pares `{"pregunta", "documento_id_esperado"}`: 10 preguntas
-"semánticas" (parafrasean el texto) y 6 con **términos exactos** (`PMS`, `anafes`,
-`$15.000`, teléfono interno `9`, `calle Costanera`, `shuttle`), pensadas para el caso
-donde la búsqueda léxica debería aportar. Para cada pregunta se recuperan los top-k
-chunks y se mide a nivel documento:
-
-- **Recall@k**: ¿está el documento correcto entre los k recuperados? (0 o 1 por pregunta).
-- **Precision@k**: de los k chunks recuperados, ¿qué fracción es del documento correcto?
-
-El reporte compara `vectorial`, `bm25` e `hibrido` sobre las mismas preguntas.
-Resultados **contra Pinecone Serverless** (aws/us-east-1) con embeddings de Gemini de 1536 d:
-
-| k | modo | Precision@k | Recall@k |
-| --- | --- | --- | --- |
-| 5 | vectorial | 0.463 | 1.000 |
-| 5 | bm25 | 0.400 | 1.000 |
-| 5 | **híbrido** | 0.388 | 1.000 |
-| 3 | vectorial | 0.625 | 0.938 |
-| 3 | bm25 | 0.583 | 1.000 |
-| 3 | **híbrido** | 0.583 | 1.000 |
-| 1 | vectorial | 0.875 | 0.875 |
-| 1 | bm25 | 0.938 | 0.938 |
-| 1 | **híbrido** | 0.938 | 0.938 |
-
-Cómo leerlo, sin maquillar:
-
-- **Con las preguntas de términos exactos aparece la ventaja léxica.** A k=1 y k=3 el
-  vectorial falla alguna pregunta (Recall@1 0.875, Recall@3 0.938) que BM25 y el
-  híbrido aciertan (0.938 y 1.000). Con las 10 preguntas semánticas solas, los tres
-  modos empataban en recall.
-- **Recall@5 = 1.0 sigue saturado en los tres modos:** el corpus son 14 chunks y el
-  top-5 cubre más de un tercio. Las diferencias reales están en k bajo.
-- **Precision@5 tiene un techo de 0.70**, no de 1.0: cada documento tiene 3-4 chunks,
-  así que como mucho 3-4 de los 5 recuperados pueden ser suyos. El reporte imprime
-  ese techo.
-- **En precisión el híbrido no le gana al vectorial** (0.388 vs 0.463 a k=5): BM25
-  mete ruido léxico en la cola del ranking. Lo que el híbrido compra es no perder
-  el documento correcto cuando el embedding no lo capta, a costa de algo de precisión.
-- **Un fallo que ningún modo resuelve:** "¿Por qué concepto se cobran $15.000 por
-  estadía?" a k=1 recupera la política de reservas. El monto se tokeniza como `15` y
-  `000`, que aparecen en muchos chunks, y el embedding no asocia el monto con mascotas.
-  Es un buen candidato para mejorar (tokenizar montos como un solo término).
-
-`python evaluate.py --k 3 --min-recall 0.8` sale con código 1 si el recall
-híbrido cae bajo el umbral (útil como chequeo de regresión).
-
-## Tests
-
-Las verificaciones que antes vivían en `validate_offline.py` (chunking, esquemas,
-prompt, referencias, cadena LCEL, `get_rag_response`) ahora son tests de `pytest`,
-junto con los de la entrega nueva (ingesta, setup del índice, recuperador híbrido,
-métricas y golden set). Todo corre **sin red ni API keys**, con dobles de prueba
-(`tests/fakes.py`: embeddings deterministas, `Index` y cliente de Pinecone falsos).
-
-```bash
-pip install -r requirements-dev.txt
-pytest
-```
-
-GitHub Actions ([.github/workflows/tests.yml](.github/workflows/tests.yml)) corre la
-suite en Python 3.12 y 3.13 en cada push y pull request.
-
-## Errores comunes (y cómo están cubiertos)
-
-| Error | Qué pasa | Cobertura |
-| --- | --- | --- |
-| Mismatch de dimensiones | Subir 1536 d a un índice de 768 falla en el `upsert` | `setup_pinecone` compara la dimensión del índice existente y falla con un mensaje claro (`test_rechaza_un_indice_con_otra_dimension`) |
-| Ignorar el namespace | Búsquedas ruidosas y lentas | Todo `upsert` y `query` va con `namespace=` |
-| Chunks mal dimensionados | Chicos: sin contexto; grandes: embedding diluido | ~500 tokens, overlap 50, corte por encabezados |
-| Consultar justo después del upsert | Pinecone es eventualmente consistente | `ingest.py` espera al conteo de vectores |
-| Cambiar de proveedor de embeddings | Misma dimensión, espacio distinto: resultados aleatorios | `--reset` y nota en `.env.example` |
-
-## Nota sobre cuotas
-
-La key de Gemini del entorno es de *free tier*. La ingesta hace **una** llamada de
-embeddings para todos los chunks y `evaluate.py` cachea los embeddings de las
-preguntas (cada una se embebe una vez aunque se evalúe en tres modos). Solo
-`main.py --generar` usa el LLM de chat.
+- *Bucles infinitos*: `recursion_limit=10` en cada invocación (`config.py`). Si el modelo no
+  converge, `GraphRecursionError` se captura y el turno termina con un mensaje claro
+  (test: `test_recursion_limit_corta_un_loop_infinito`).
+- *Estado sucio*: el estado guardado crece con cada turno, pero `recortar_contexto` limita
+  lo que se **envía** al modelo (últimos 30 mensajes, empezando siempre en un mensaje del
+  usuario para no dejar un `ToolMessage` huérfano). El historial completo queda en SQLite.
+- *Excepciones en tools*: `ToolNode(handle_tool_errors=True)` las convierte en un `ToolMessage`
+  de error, así el modelo puede reintentar en vez de romper el grafo.
+- *Descripciones vagas*: un test verifica que cada herramienta tenga un docstring sustancial.

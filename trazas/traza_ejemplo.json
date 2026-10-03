@@ -1,0 +1,143 @@
+{
+  "modelo": "gemini-3.5-flash-lite",
+  "fecha": "2026-10-03T14:56:07-03:00",
+  "recursion_limit": 10,
+  "escenarios": [
+    {
+      "thread_id": "demo-multipaso",
+      "turnos": [
+        {
+          "usuario": "¿Cuántos pedidos tuvo Laura Gómez y cuál fue el total?",
+          "thread_id": "demo-multipaso",
+          "llamadas_herramienta": 2,
+          "pasos": [
+            {
+              "tipo": "accion",
+              "contenido": "buscar_cliente({'nombre': 'Laura Gomez'})",
+              "herramienta": "buscar_cliente",
+              "argumentos": {
+                "nombre": "Laura Gomez"
+              }
+            },
+            {
+              "tipo": "observacion",
+              "contenido": "{\"cantidad\": 1, \"coincidencias\": [{\"cliente_id\": 102, \"nombre\": \"Laura Gómez\"}]}",
+              "herramienta": "buscar_cliente"
+            },
+            {
+              "tipo": "accion",
+              "contenido": "buscar_pedidos({'cliente_id': 102})",
+              "herramienta": "buscar_pedidos",
+              "argumentos": {
+                "cliente_id": 102
+              }
+            },
+            {
+              "tipo": "observacion",
+              "contenido": "{\"cliente_id\": 102, \"cliente\": \"Laura Gómez\", \"cantidad_pedidos\": 3, \"total\": 14500, \"pedidos\": [{\"id\": 5001, \"fecha\": \"2026-08-03\", \"total\": 4200, \"estado\": \"entregado\"}, {\"id\": 5002, \"fecha\": \"2026-08-21\", \"total\": 6300, \"estado\": \"entregado\"}, {\"id\": 5003, \"fecha\": \"2026-09-18\", \"total\": 4000, \"estado\": \"en camino\"}]}",
+              "herramienta": "buscar_pedidos"
+            },
+            {
+              "tipo": "respuesta",
+              "contenido": "Laura Gómez tuvo 3 pedidos y el total gastado fue de $14.500."
+            }
+          ],
+          "respuesta": "Laura Gómez tuvo 3 pedidos y el total gastado fue de $14.500."
+        },
+        {
+          "usuario": "¿Y el último?",
+          "thread_id": "demo-multipaso",
+          "llamadas_herramienta": 1,
+          "pasos": [
+            {
+              "tipo": "accion",
+              "contenido": "buscar_pedidos({'cliente_id': 102})",
+              "herramienta": "buscar_pedidos",
+              "argumentos": {
+                "cliente_id": 102
+              }
+            },
+            {
+              "tipo": "observacion",
+              "contenido": "{\"cliente_id\": 102, \"cliente\": \"Laura Gómez\", \"cantidad_pedidos\": 3, \"total\": 14500, \"pedidos\": [{\"id\": 5001, \"fecha\": \"2026-08-03\", \"total\": 4200, \"estado\": \"entregado\"}, {\"id\": 5002, \"fecha\": \"2026-08-21\", \"total\": 6300, \"estado\": \"entregado\"}, {\"id\": 5003, \"fecha\": \"2026-09-18\", \"total\": 4000, \"estado\": \"en camino\"}]}",
+              "herramienta": "buscar_pedidos"
+            },
+            {
+              "tipo": "respuesta",
+              "contenido": "El último pedido fue el N° 5003, realizado el 18/09/2026 por $4.000, y su estado actual es \"en camino\"."
+            }
+          ],
+          "respuesta": "El último pedido fue el N° 5003, realizado el 18/09/2026 por $4.000, y su estado actual es \"en camino\"."
+        },
+        {
+          "usuario": "Cambiando de tema un segundo: ¿de qué clienta estábamos hablando y cuánto era su total?",
+          "thread_id": "demo-multipaso",
+          "llamadas_herramienta": 0,
+          "pasos": [
+            {
+              "tipo": "respuesta",
+              "contenido": "Estábamos hablando de Laura Gómez, y su total gastado es de $14.500."
+            }
+          ],
+          "respuesta": "Estábamos hablando de Laura Gómez, y su total gastado es de $14.500."
+        }
+      ]
+    },
+    {
+      "thread_id": "demo-errores",
+      "turnos": [
+        {
+          "usuario": "¿Cuántos pedidos tuvo el cliente 999?",
+          "thread_id": "demo-errores",
+          "llamadas_herramienta": 1,
+          "pasos": [
+            {
+              "tipo": "accion",
+              "contenido": "buscar_pedidos({'cliente_id': 999})",
+              "herramienta": "buscar_pedidos",
+              "argumentos": {
+                "cliente_id": 999
+              }
+            },
+            {
+              "tipo": "observacion",
+              "contenido": "{\"error\": \"No existe un cliente con id 999.\", \"sugerencia\": \"Si tenes el nombre del cliente, buscalo con buscar_cliente.\"}",
+              "herramienta": "buscar_pedidos",
+              "error": true
+            },
+            {
+              "tipo": "respuesta",
+              "contenido": "No encontré ningún cliente con el ID 999. ¿Tenés el nombre o apellido del cliente para que lo busque?"
+            }
+          ],
+          "respuesta": "No encontré ningún cliente con el ID 999. ¿Tenés el nombre o apellido del cliente para que lo busque?"
+        },
+        {
+          "usuario": "Pasame los pedidos de García",
+          "thread_id": "demo-errores",
+          "llamadas_herramienta": 1,
+          "pasos": [
+            {
+              "tipo": "accion",
+              "contenido": "buscar_cliente({'nombre': 'Garcia'})",
+              "herramienta": "buscar_cliente",
+              "argumentos": {
+                "nombre": "Garcia"
+              }
+            },
+            {
+              "tipo": "observacion",
+              "contenido": "{\"cantidad\": 2, \"coincidencias\": [{\"cliente_id\": 103, \"nombre\": \"Carlos García\"}, {\"cliente_id\": 104, \"nombre\": \"María García\"}]}",
+              "herramienta": "buscar_cliente"
+            },
+            {
+              "tipo": "respuesta",
+              "contenido": "Encontré dos clientes con ese apellido: Carlos García (ID 103) y María García (ID 104). ¿A cuál de los dos te referís?"
+            }
+          ],
+          "respuesta": "Encontré dos clientes con ese apellido: Carlos García (ID 103) y María García (ID 104). ¿A cuál de los dos te referís?"
+        }
+      ]
+    }
+  ]
+}

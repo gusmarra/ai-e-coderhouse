@@ -1,6 +1,6 @@
 name: tests
 
-# Corre la suite offline (sin red ni API keys) en cada push y cada pull request.
+# Suite offline (LLM guionado: sin red ni API keys) + lint + tipos.
 on:
   push:
   pull_request:
@@ -19,4 +19,6 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: mypy *.py tests
       - run: pytest

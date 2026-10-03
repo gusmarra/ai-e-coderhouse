@@ -1,33 +1,26 @@
 [project]
-name = "rag-hibrido-pinecone-hotel-bahia-serena"
-version = "2.0.0"
-description = "RAG escalable en la nube: ingesta a Pinecone Serverless, recuperador hibrido (BM25 + vectorial) y evaluacion con Precision@k / Recall@k"
+name = "agente-react-sqlite-langgraph"
+version = "1.0.0"
+description = "Agente de razonamiento ciclico (ReAct) con LangGraph, herramientas propias y memoria persistente en SQLite"
 requires-python = ">=3.12"
 dependencies = [
-    "langchain-core>=0.3.60",
-    "langchain-classic>=1.0",
-    "langchain-community>=0.3",
-    "langchain-text-splitters>=0.3",
-    "pinecone>=7.0",
-    "rank-bm25>=0.2.2",
-    "pydantic>=2.9,<3",
+    "langgraph>=1.0",
+    "langgraph-checkpoint-sqlite>=3.0",
+    "aiosqlite>=0.20",
+    "langchain-core>=1.0",
     "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-openai = ["langchain-openai>=0.3"]
-gemini = ["langchain-google-genai>=2.1"]
-all = ["langchain-openai>=0.3", "langchain-google-genai>=2.1"]
-dev = ["pytest>=8"]
+gemini = ["langchain-google-genai>=4"]
+openai = ["langchain-openai>=1"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "mypy>=1.11"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "auto"
 addopts = "-ra"
-filterwarnings = [
-    # langchain-community anuncia su "sunset"; BM25Retriever sigue viviendo ahi.
-    "ignore:.*langchain-community.*:DeprecationWarning",
-]
 
 [tool.ruff]
 line-length = 110
@@ -35,3 +28,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true

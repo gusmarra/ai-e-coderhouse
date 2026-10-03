@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-# Entregas anteriores: viven en el repo pero fuera de esta entrega.
+# Base de checkpoints local (se regenera sola al correr el agente).
+*.sqlite*
+# Entregas anteriores: carpeta local, fuera de esta entrega.
 entregas/
-

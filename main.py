@@ -1,70 +1,77 @@
-"""Demo del recuperador hibrido contra Pinecone (y, opcionalmente, generacion con LLM).
+"""CLI del agente ReAct.
 
-Uso::
-
-    python main.py                                   # pregunta de ejemplo
-    python main.py "¿Cuánto cuesta el valet parking?"
-    python main.py "¿Dónde está el DEA?" --categoria seguridad   # filtro por metadata
-    python main.py "..." --generar                   # ademas redacta la respuesta con el LLM
-
-Requiere haber corrido antes `python ingest.py` (ver README).
+python main.py demo                              # corre los escenarios y escribe trazas/
+python main.py preguntar "..." --thread-id ana   # una pregunta; el thread recuerda
+python main.py chat --thread-id ana              # conversacion interactiva
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
 import sys
-import warnings
+from pathlib import Path
 
-from retriever import RAGSystem
-from schemas import RespuestaRAG
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-logging.basicConfig(level=logging.WARNING, format="%(levelname)-8s %(name)s: %(message)s")
-for ruidoso in ("httpx", "httpcore", "openai", "google_genai", "urllib3"):
-    logging.getLogger(ruidoso).setLevel(logging.ERROR)
-warnings.filterwarnings("ignore", category=UserWarning, module="langchain_google_genai")
-
-PREGUNTA_EJEMPLO = "¿Cuáles son los horarios de check-in y check-out, y cuánto cuesta un late check-out?"
+from config import TRAZAS_DIR, ruta_checkpoints
+from demo import ejecutar_demo
+from grafo import construir_grafo
+from llm import crear_modelo
+from trazas import ejecutar_turno, formatear_paso
 
 
-def mostrar_recuperados(rag: RAGSystem, pregunta: str, categoria: str | None) -> None:
-    print(f"\nPregunta: {pregunta}" + (f"  [categoria={categoria}]" if categoria else ""))
-    print(f"Top-{rag.top_k} (BM25 + vectorial):")
-    for i, doc in enumerate(rag.retrieve(pregunta, categoria=categoria), start=1):
-        m = doc.metadata
-        print(f"  {i}. {m.get('source')} · {m.get('seccion')} · {m.get('categoria')}")
-        print(f"     {doc.page_content[:110].strip()!r}...")
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Agente de razonamiento ciclico (LangGraph + SQLite)")
+    sub = parser.add_subparsers(dest="comando", required=True)
+    sub.add_parser("demo", help="corre los escenarios de la consigna y guarda la traza en trazas/")
+    preguntar = sub.add_parser("preguntar", help="hace una pregunta y termina")
+    preguntar.add_argument("pregunta")
+    chat = sub.add_parser("chat", help="conversacion interactiva (Enter vacio para salir)")
+    for p in (preguntar, chat):
+        p.add_argument("--thread-id", default="default", help="misma id = misma conversacion")
+    return parser
 
 
-def mostrar_respuesta(resultado: RespuestaRAG) -> None:
-    print(f"\nRespuesta: {resultado.respuesta}")
-    print(f"Encontrado en contexto: {resultado.encontrado_en_contexto}")
+async def _chat(thread_id: str, db: Path) -> None:
+    llm = crear_modelo()
+    async with AsyncSqliteSaver.from_conn_string(str(db)) as saver:
+        grafo = construir_grafo(llm, saver)
+        while pregunta := (await asyncio.to_thread(input, "\nUsuario: ")).strip():
+            await ejecutar_turno(grafo, pregunta, thread_id, on_paso=lambda p: print(formatear_paso(p)))
 
 
-async def generar(pregunta: str, rag: RAGSystem) -> RespuestaRAG:
-    from rag import get_rag_response
+async def _preguntar(pregunta: str, thread_id: str, db: Path) -> None:
+    llm = crear_modelo()
+    async with AsyncSqliteSaver.from_conn_string(str(db)) as saver:
+        grafo = construir_grafo(llm, saver)
+        await ejecutar_turno(grafo, pregunta, thread_id, on_paso=lambda p: print(formatear_paso(p)))
 
-    return await get_rag_response(pregunta, retriever=rag)
+
+async def _demo() -> None:
+    llm = crear_modelo()
+    nombre = str(getattr(llm, "model_name", None) or getattr(llm, "model", "desconocido"))
+    await ejecutar_demo(
+        llm,
+        db_path=ruta_checkpoints().with_name("demo_checkpoints.sqlite"),
+        destino_json=TRAZAS_DIR / "traza_ejemplo.json",
+        destino_log=TRAZAS_DIR / "traza_ejemplo.log",
+        nombre_modelo=nombre,
+    )
+    print(f"\nTraza guardada en {TRAZAS_DIR}")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Consulta al recuperador hibrido")
-    parser.add_argument("pregunta", nargs="?", default=PREGUNTA_EJEMPLO)
-    parser.add_argument("--categoria", help="filtra por metadata: reservas | reglamento | servicios | seguridad")
-    parser.add_argument("--generar", action="store_true", help="redacta la respuesta con el LLM (gasta cuota)")
-    args = parser.parse_args()
-
-    rag = RAGSystem.desde_entorno()
-    mostrar_recuperados(rag, args.pregunta, args.categoria)
-    if args.generar:
-        mostrar_respuesta(asyncio.run(generar(args.pregunta, rag)))
-    return 0
+def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]  # tildes en consolas Windows
+    args = _parser().parse_args()
+    match args.comando:
+        case "demo":
+            asyncio.run(_demo())
+        case "preguntar":
+            asyncio.run(_preguntar(args.pregunta, args.thread_id, ruta_checkpoints()))
+        case "chat":
+            asyncio.run(_chat(args.thread_id, ruta_checkpoints()))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
