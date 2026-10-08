@@ -1,20 +1,8 @@
 [project]
-name = "agente-react-sqlite-langgraph"
+name = "orquestador-multiagente-langgraph"
 version = "1.0.0"
-description = "Agente de razonamiento ciclico (ReAct) con LangGraph, herramientas propias y memoria persistente en SQLite"
+description = "Orquestador multi-agente jerarquico (Supervisor + Investigador + Analista) con LangGraph sobre la base del Hotel Bahia Serena"
 requires-python = ">=3.12"
-dependencies = [
-    "langgraph>=1.0",
-    "langgraph-checkpoint-sqlite>=3.0",
-    "aiosqlite>=0.20",
-    "langchain-core>=1.0",
-    "python-dotenv>=1.0",
-]
-
-[project.optional-dependencies]
-gemini = ["langchain-google-genai>=4"]
-openai = ["langchain-openai>=1"]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "mypy>=1.11"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -23,7 +11,7 @@ asyncio_mode = "auto"
 addopts = "-ra"
 
 [tool.ruff]
-line-length = 110
+line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]

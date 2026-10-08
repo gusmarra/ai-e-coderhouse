@@ -1,118 +1,163 @@
 from __future__ import annotations
 
-from pathlib import Path
+import pytest
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from agents.supervisor import aplicar_guardas
+from base_hotel import BuscadorHotel, cargar_chunks
+from config import MAX_PASOS
+from graph import construir_grafo, enrutar, estado_inicial
+from tests.fakes import ModeloGuionado, decision, llamada
+from trazas import ejecutar
 
-from grafo import construir_grafo, recortar_contexto
-from tests.fakes import ModeloGuionado, llamada
-from trazas import Turno, ejecutar_turno
-
-
-def _nombres_de_acciones(turno: Turno) -> list[str]:
-    return [p.herramienta or "" for p in turno.pasos if p.tipo == "accion"]
+PREGUNTA = "4 noches a USD 150, temporada alta, cancela 3 dias antes: ¿penalidad?"
+LIMITE: RunnableConfig = {"recursion_limit": 25}
 
 
-async def test_razonamiento_multipaso_encadena_dos_herramientas() -> None:
-    llm = ModeloGuionado(
+@pytest.fixture(scope="module")
+def buscador() -> BuscadorHotel:
+    return BuscadorHotel(cargar_chunks())
+
+
+def _especialistas(*extra: AIMessage) -> ModeloGuionado:
+    """Guion base: investigador (busca + responde), analista (calcula + responde)."""
+    return ModeloGuionado(
         guion=[
-            llamada("buscar_cliente", "c1", nombre="Laura Gómez"),
-            llamada("buscar_pedidos", "c2", cliente_id=102),
-            AIMessage("Laura Gómez tuvo 3 pedidos por un total de $14.500."),
+            llamada("buscar_en_documentos_hotel", "i1", consulta="temporada alta cancelacion penalidad"),
+            AIMessage("Penalidad: 50% de la estadía reservada (fuente: politica-reservas-cancelaciones.md)."),
+            llamada("calcular", "a1", expresion="0.5 * 4 * 150"),
+            AIMessage("Penalidad = 0.5 * 4 * 150 = USD 300."),
+            *extra,
         ]
     )
-    grafo = construir_grafo(llm, InMemorySaver())
-
-    turno = await ejecutar_turno(grafo, "¿Cuántos pedidos tuvo Laura Gómez?", "t1")
-
-    assert _nombres_de_acciones(turno) == ["buscar_cliente", "buscar_pedidos"]
-    assert turno.llamadas_herramienta == 2
-    assert [p.tipo for p in turno.pasos] == ["accion", "observacion", "accion", "observacion", "respuesta"]
-    assert "14.500" in turno.respuesta
 
 
-async def test_sin_tool_calls_el_grafo_termina_sin_pasar_por_herramientas() -> None:
-    grafo = construir_grafo(ModeloGuionado(guion=[AIMessage("Hola!")]), InMemorySaver())
-    turno = await ejecutar_turno(grafo, "hola", "t1")
-    assert [p.tipo for p in turno.pasos] == ["respuesta"]
-
-
-async def test_ciclo_de_retorno_el_error_vuelve_al_modelo_que_reintenta() -> None:
-    llm = ModeloGuionado(
-        guion=[
-            llamada("buscar_pedidos", "c1", cliente_id=999),  # id inexistente -> error
-            llamada("buscar_cliente", "c2", nombre="Laura Gómez"),  # 2do intento, otra estrategia
-            llamada("buscar_pedidos", "c3", cliente_id=102),
-            AIMessage("Ese id no existe; con el nombre encontré 3 pedidos."),
-        ]
+def _supervisor(*decisiones: object) -> ModeloGuionado:
+    return ModeloGuionado(
+        guion=[AIMessage("La penalidad es de USD 300 (politica-reservas-cancelaciones.md).")],
+        decisiones=list(decisiones),  # type: ignore[arg-type]
     )
-    grafo = construir_grafo(llm, InMemorySaver())
-
-    turno = await ejecutar_turno(grafo, "pedidos del cliente 999", "t1")
-
-    observaciones = [p for p in turno.pasos if p.tipo == "observacion"]
-    assert observaciones[0].error and not observaciones[1].error
-    # El modelo vio el ToolMessage con el error antes de decidir su 2do intento.
-    vistos_en_2da_llamada = llm.recibidos[1]
-    assert isinstance(vistos_en_2da_llamada[-1], ToolMessage)
-    assert "No existe un cliente" in vistos_en_2da_llamada[-1].text
 
 
-async def test_una_excepcion_en_la_herramienta_no_rompe_el_grafo() -> None:
-    # cliente_id no numerico: la validacion del schema falla y ToolNode lo devuelve como error.
-    guion = [llamada("buscar_pedidos", "c1", cliente_id="abc"), AIMessage("Necesito un id.")]
-    llm = ModeloGuionado(guion=guion)
-    turno = await ejecutar_turno(construir_grafo(llm, InMemorySaver()), "pedidos", "t1")
-    assert turno.pasos[1].tipo == "observacion" and turno.pasos[1].error
-    assert turno.respuesta == "Necesito un id."
+async def test_flujo_completo_investigador_analista_sintesis(buscador: BuscadorHotel) -> None:
+    sup = _supervisor(
+        decision("investigador", "Buscar la penalidad de temporada alta"),
+        decision("analista", "Calcular la penalidad"),
+        decision("FINISH"),
+    )
+    grafo = construir_grafo(sup, llm_especialistas=_especialistas(), buscador=buscador)
+
+    traza = await ejecutar(grafo, PREGUNTA)
+
+    assert traza.ruta == ["supervisor", "investigador", "supervisor", "analista", "supervisor", "sintesis"]
+    assert [c["agente"] for c in traza.contribuciones] == ["investigador", "analista"]
+    assert traza.contribuciones[0]["herramientas"] == ["buscar_en_documentos_hotel"]
+    assert traza.contribuciones[1]["herramientas"] == ["calcular"]
+    assert "USD 300" in traza.respuesta
+    assert traza.pasos == 2
 
 
-async def test_recursion_limit_corta_un_loop_infinito() -> None:
-    llm = ModeloGuionado(guion=[llamada("buscar_pedidos", "c1", cliente_id=102)])  # repite siempre
-    turno = await ejecutar_turno(construir_grafo(llm, InMemorySaver()), "loop", "t1")
-    assert turno.pasos[-1].tipo == "limite"
-    assert "No pude resolverlo" in turno.respuesta
-    assert turno.llamadas_herramienta <= 5
+async def test_estado_final_conserva_el_aporte_de_cada_agente(buscador: BuscadorHotel) -> None:
+    sup = _supervisor(decision("investigador", "x"), decision("analista", "y"), decision("FINISH"))
+    grafo = construir_grafo(sup, llm_especialistas=_especialistas(), buscador=buscador)
+
+    final = await grafo.ainvoke(estado_inicial(PREGUNTA), LIMITE)
+
+    assert set(final["hallazgos"]) == {"investigador", "analista"}  # el reducer fusiona, no pisa
+    assert "politica-reservas-cancelaciones.md" in final["hallazgos"]["investigador"]["fuentes"]
+    assert final["task_completed"] is True
+    assert [m.name for m in final["messages"][1:]] == ["investigador", "analista", "supervisor"]
 
 
-async def test_mismo_thread_id_recuerda_y_otro_thread_no() -> None:
-    llm = ModeloGuionado(guion=[AIMessage("uno"), AIMessage("dos"), AIMessage("tres")])
-    grafo = construir_grafo(llm, InMemorySaver())
+async def test_el_analista_recibe_la_consigna_y_los_datos_no_el_historial(buscador: BuscadorHotel) -> None:
+    esp = _especialistas()
+    sup = _supervisor(decision("investigador", "buscar"), decision("analista", "calcular"), decision("FINISH"))
+    await construir_grafo(sup, llm_especialistas=esp, buscador=buscador).ainvoke(estado_inicial(PREGUNTA), LIMITE)
 
-    await ejecutar_turno(grafo, "Me llamo Ana", "hilo-a")
-    await ejecutar_turno(grafo, "¿Cómo me llamo?", "hilo-a")
-    await ejecutar_turno(grafo, "¿Cómo me llamo?", "hilo-b")
-
-    def humanos(i: int) -> list[str]:
-        return [m.text for m in llm.recibidos[i] if isinstance(m, HumanMessage)]
-
-    assert humanos(1) == ["Me llamo Ana", "¿Cómo me llamo?"]
-    assert humanos(2) == ["¿Cómo me llamo?"]
+    primera_del_analista = esp.recibidos[2]  # 0-1: investigador, 2: analista
+    assert [m.type for m in primera_del_analista] == ["system", "human"]  # sin ToolMessages ni charla ajena
+    texto = str(primera_del_analista[1].content)
+    assert "Tu consigna ahora: calcular" in texto
+    assert "50% de la estadía" in texto  # el hallazgo del investigador si le llega
 
 
-async def test_la_memoria_sobrevive_a_reabrir_el_archivo_sqlite(tmp_path: Path) -> None:
-    db = str(tmp_path / "cp.sqlite")
-    llm = ModeloGuionado(guion=[AIMessage("Hola Ana"), AIMessage("Te llamás Ana")])
+async def test_el_supervisor_ve_hallazgos_con_fuentes_pero_no_trazas_de_herramientas(
+    buscador: BuscadorHotel,
+) -> None:
+    sup = _supervisor(decision("investigador", "x"), decision("analista", "y"), decision("FINISH"))
+    await construir_grafo(sup, llm_especialistas=_especialistas(), buscador=buscador).ainvoke(
+        estado_inicial(PREGUNTA), LIMITE
+    )
+    tercera_decision = str(sup.recibidos[2][1].content)
+    assert "[investigador] version 1 · fuentes: politica-reservas-cancelaciones.md" in tercera_decision
+    assert "[analista] version 1" in tercera_decision
+    assert "(fuente: politica-reservas-cancelaciones.md, seccion" not in tercera_decision  # output crudo de la tool
 
-    async with AsyncSqliteSaver.from_conn_string(db) as saver:
-        await ejecutar_turno(construir_grafo(llm, saver), "Me llamo Ana", "hilo")
-    async with AsyncSqliteSaver.from_conn_string(db) as saver:  # "proceso nuevo"
-        await ejecutar_turno(construir_grafo(llm, saver), "¿Cómo me llamo?", "hilo")
 
-    previos = [m.text for m in llm.recibidos[1] if isinstance(m, HumanMessage | AIMessage)]
-    assert previos == ["Me llamo Ana", "Hola Ana", "¿Cómo me llamo?"]
+async def test_refinamiento_el_supervisor_devuelve_el_trabajo_al_analista(buscador: BuscadorHotel) -> None:
+    sup = _supervisor(
+        decision("investigador", "buscar"),
+        decision("analista", "calcular"),
+        decision("analista", "Falta indicar el plazo sin cargo", "rubrica 3"),
+        decision("FINISH"),
+    )
+    esp = _especialistas(AIMessage("USD 300; plazo sin cargo: hasta 7 días antes."))
+    grafo = construir_grafo(sup, llm_especialistas=esp, buscador=buscador)
+
+    final = await grafo.ainvoke(estado_inicial(PREGUNTA), LIMITE)
+
+    assert [c["agente"] for c in final["contribuciones"]] == ["investigador", "analista", "analista"]
+    assert final["hallazgos"]["analista"]["version"] == 2
+    assert "7 días" in final["hallazgos"]["analista"]["contenido"]
 
 
-def test_recortar_contexto_no_deja_tool_messages_huerfanos() -> None:
-    mensajes = [
-        HumanMessage("viejo"),
-        llamada("buscar_pedidos", "x", cliente_id=1),
-        ToolMessage("{}", tool_call_id="x"),
-        AIMessage("ok"),
-        HumanMessage("nuevo"),
-        AIMessage("resp"),
-    ]
-    recortados = recortar_contexto(mensajes, maximo=4)
-    assert isinstance(recortados[0], HumanMessage) and recortados[0].text == "nuevo"
+async def test_supervisor_infinito_el_tope_de_refinamientos_fuerza_el_cierre(buscador: BuscadorHotel) -> None:
+    """Un supervisor que siempre pide 'una correccion mas' no puede colgar el sistema."""
+    sup = _supervisor(decision("investigador", "buscar"), decision("analista", "otra vez"))  # repite el ultimo
+    grafo = construir_grafo(sup, llm_especialistas=_especialistas(), buscador=buscador)
+
+    traza = await ejecutar(grafo, PREGUNTA)
+
+    assert traza.ruta[-1] == "sintesis"
+    assert traza.ruta.count("analista") == 2  # 1 pasada + 1 refinamiento, no mas
+    assert traza.pasos <= MAX_PASOS
+
+
+async def test_supervisor_que_solo_pide_investigar_tambien_termina(buscador: BuscadorHotel) -> None:
+    sup = _supervisor(decision("investigador", "de nuevo"))
+    traza = await ejecutar(construir_grafo(sup, llm_especialistas=_especialistas(), buscador=buscador), PREGUNTA)
+    assert traza.ruta.count("investigador") == 2
+    assert traza.ruta[-1] == "sintesis"
+
+
+def test_guarda_el_analista_no_arranca_sin_datos() -> None:
+    corregida = aplicar_guardas(decision("analista", "calcular"), estado_inicial(PREGUNTA))  # type: ignore[arg-type]
+    assert corregida.siguiente == "investigador"
+
+
+def test_guarda_no_se_cierra_sin_haber_investigado() -> None:
+    corregida = aplicar_guardas(decision("FINISH"), estado_inicial(PREGUNTA))  # type: ignore[arg-type]
+    assert corregida.siguiente == "investigador"
+
+
+def test_guarda_tope_de_pasos_fuerza_finish() -> None:
+    estado = estado_inicial(PREGUNTA) | {"pasos": MAX_PASOS}
+    assert aplicar_guardas(decision("investigador", "x"), estado).siguiente == "FINISH"  # type: ignore[arg-type]
+
+
+def test_guarda_completa_consigna_vacia_con_el_pedido_original() -> None:
+    hallazgo = {"contenido": "x", "fuentes": [], "version": 1}
+    estado = estado_inicial(PREGUNTA) | {"hallazgos": {"investigador": hallazgo}}
+    assert aplicar_guardas(decision("analista", ""), estado).instruccion == PREGUNTA  # type: ignore[arg-type]
+
+
+def test_enrutar_mapea_finish_al_nodo_sintesis() -> None:
+    assert enrutar({"next_agent": "FINISH"}) == "sintesis"  # type: ignore[typeddict-item]
+    assert enrutar({"next_agent": "analista"}) == "analista"  # type: ignore[typeddict-item]
+
+
+def test_el_diagrama_refleja_la_topologia() -> None:
+    mermaid = construir_grafo(_supervisor(decision("FINISH"))).get_graph().draw_mermaid()
+    for nodo in ("supervisor", "investigador", "analista", "sintesis"):
+        assert nodo in mermaid

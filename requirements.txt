@@ -1,10 +1,16 @@
-# Grafo, ToolNode y tools_condition.
+# Grafo, create_react_agent, Command y MessagesState.
 langgraph>=1.0
-# Checkpointer SQLite (incluye AsyncSqliteSaver) y su driver asincrono.
-langgraph-checkpoint-sqlite>=3.0
-aiosqlite>=0.20
 langchain-core>=1.0
+pydantic>=2.9,<3
 python-dotenv>=1.0
+
+# Base de conocimiento del Hotel Bahia Serena: chunking + BM25 local (siempre)
+# y Pinecone (opcional, si hay PINECONE_API_KEY).
+langchain-text-splitters>=0.3
+langchain-classic>=1.0
+langchain-community>=0.3
+rank-bm25>=0.2.2
+pinecone>=7.0
 
 # LLM: alcanza con uno. Gemini es el de por defecto (.env.example).
 langchain-google-genai>=4

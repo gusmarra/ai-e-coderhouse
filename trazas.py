@@ -1,137 +1,93 @@
-"""Ejecucion de un turno del agente y registro de la traza ReAct.
-
-`ejecutar_turno` corre el grafo con `stream_mode="updates"`: cada vez que un nodo
-termina, emite lo que escribio al estado. Eso permite reconstruir, en orden, el ciclo
-Pensamiento -> Accion -> Observacion -> Respuesta, e imprimirlo en vivo.
-"""
+"""Corre el grafo y reconstruye la traza de delegacion: quien actuo, con que consigna y que devolvio."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 
 from config import RECURSION_LIMIT
+from graph import estado_inicial
 
-__all__ = ["Paso", "Turno", "ejecutar_turno", "formatear_paso", "pasos_desde_mensajes"]
-
-TipoPaso = Literal["pensamiento", "accion", "observacion", "respuesta", "limite"]
-
-
-@dataclass
-class Paso:
-    tipo: TipoPaso
-    contenido: str
-    herramienta: str | None = None
-    argumentos: dict[str, Any] | None = None
-    error: bool = False
+__all__ = ["Evento", "Traza", "ejecutar", "formatear_evento", "guardar"]
 
 
 @dataclass
-class Turno:
-    usuario: str
-    thread_id: str
-    pasos: list[Paso] = field(default_factory=list)
+class Evento:
+    nodo: str  # supervisor | investigador | analista | sintesis
+    detalle: str  # decision, resumen del output o respuesta final
+    consigna: str = ""  # lo que el supervisor le pidio al especialista
+    herramientas: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Traza:
+    pregunta: str
+    eventos: list[Evento] = field(default_factory=list)
     respuesta: str = ""
+    pasos: int = 0
+    contribuciones: list[dict[str, Any]] = field(default_factory=list)
 
     @property
-    def llamadas_herramienta(self) -> int:
-        return sum(1 for p in self.pasos if p.tipo == "accion")
-
-    def a_dict(self) -> dict[str, Any]:
-        return {
-            "usuario": self.usuario,
-            "thread_id": self.thread_id,
-            "llamadas_herramienta": self.llamadas_herramienta,
-            "pasos": [{k: v for k, v in asdict(p).items() if v not in (None, False)} for p in self.pasos],
-            "respuesta": self.respuesta,
-        }
+    def ruta(self) -> list[str]:
+        return [e.nodo for e in self.eventos]
 
 
-def _texto(mensaje: BaseMessage) -> str:
-    """Texto plano de un mensaje (Gemini a veces devuelve una lista de bloques)."""
-    return mensaje.text.strip()
+def _a_evento(nodo: str, update: dict[str, Any]) -> Evento:
+    if nodo == "supervisor":
+        destino = "FINISH" if update["next_agent"] == "FINISH" else update["next_agent"]
+        consigna = f" · consigna: {update['instruccion']}" if update.get("instruccion") else ""
+        return Evento(nodo, f"-> {destino} · {update['razon']}{consigna}")
+    if nodo == "sintesis":
+        return Evento(nodo, update["respuesta_final"])
+    contrib = update["contribuciones"][0]
+    return Evento(nodo, update["hallazgos"][nodo]["contenido"], contrib["instruccion"], contrib["herramientas"])
 
 
-def _es_error(contenido: str) -> bool:
-    try:
-        datos = json.loads(contenido)
-    except ValueError:
-        return contenido.lower().startswith("error")
-    return isinstance(datos, dict) and "error" in datos
+def formatear_evento(evento: Evento) -> str:
+    cabecera = f"[{evento.nodo.upper()}]"
+    if evento.herramientas:
+        cabecera += f" herramientas: {', '.join(evento.herramientas)}"
+    cuerpo = []
+    if evento.consigna:
+        cuerpo.append(f"  consigna: {evento.consigna}")
+    cuerpo.append("  " + evento.detalle.replace("\n", "\n  "))
+    return cabecera + "\n" + "\n".join(cuerpo)
 
 
-def pasos_desde_mensajes(mensajes: list[BaseMessage]) -> list[Paso]:
-    """Traduce los mensajes nuevos que escribio un nodo a pasos de la traza ReAct."""
-    pasos: list[Paso] = []
-    for m in mensajes:
-        if isinstance(m, AIMessage):
-            if m.tool_calls:
-                if texto := _texto(m):
-                    pasos.append(Paso("pensamiento", texto))
-                pasos.extend(
-                    Paso("accion", f"{c['name']}({c['args']})", c["name"], dict(c["args"]))
-                    for c in m.tool_calls
-                )
-            else:
-                pasos.append(Paso("respuesta", _texto(m)))
-        elif isinstance(m, ToolMessage):
-            contenido = _texto(m)
-            error = _es_error(contenido) or m.status == "error"
-            pasos.append(Paso("observacion", contenido, m.name, error=error))
-    return pasos
-
-
-def formatear_paso(paso: Paso) -> str:
-    etiqueta = {
-        "pensamiento": "PENSAMIENTO ",
-        "accion": "ACCION      ",
-        "observacion": "OBSERVACION ",
-        "respuesta": "RESPUESTA   ",
-        "limite": "LIMITE      ",
-    }[paso.tipo]
-    marca = " [ERROR]" if paso.error else ""
-    return f"  {etiqueta}{paso.contenido}{marca}"
-
-
-async def ejecutar_turno(
+async def ejecutar(
     grafo: CompiledStateGraph,
     pregunta: str,
-    thread_id: str,
     *,
-    on_paso: Callable[[Paso], None] | None = None,
-) -> Turno:
-    """Envia una pregunta al agente en el `thread_id` dado y devuelve el turno con su traza.
+    config: dict[str, Any] | None = None,
+    on_evento: Callable[[Evento], None] | None = None,
+) -> Traza:
+    """Ejecuta una consulta con `recursion_limit` y devuelve la traza completa."""
+    traza = Traza(pregunta=pregunta)
+    cfg: RunnableConfig = {"recursion_limit": RECURSION_LIMIT, **(config or {})}  # type: ignore[typeddict-item]
+    async for chunk in grafo.astream(estado_inicial(pregunta), cfg, stream_mode="updates"):
+        for nodo, update in chunk.items():
+            evento = _a_evento(nodo, update)
+            traza.eventos.append(evento)
+            if nodo in ("investigador", "analista"):
+                traza.contribuciones.extend(update["contribuciones"])
+                traza.pasos = update["pasos"]
+            if nodo == "sintesis":
+                traza.respuesta = update["respuesta_final"]
+            if on_evento:
+                on_evento(evento)
+    return traza
 
-    El `thread_id` es la clave bajo la que el checkpointer guarda el estado: mismo id,
-    misma conversacion. `recursion_limit` corta el ciclo si el modelo no converge.
-    """
-    turno = Turno(usuario=pregunta, thread_id=thread_id)
-    config: RunnableConfig = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
 
-    def registrar(paso: Paso) -> None:
-        turno.pasos.append(paso)
-        if on_paso:
-            on_paso(paso)
-
-    try:
-        async for update in grafo.astream(
-            {"messages": [HumanMessage(pregunta)]}, config, stream_mode="updates"
-        ):
-            for salida in update.values():
-                for paso in pasos_desde_mensajes(salida["messages"]):
-                    registrar(paso)
-                    if paso.tipo == "respuesta":
-                        turno.respuesta = paso.contenido
-    except GraphRecursionError:
-        turno.respuesta = (
-            f"No pude resolverlo en {RECURSION_LIMIT} pasos. Probá reformular la pregunta con más datos."
-        )
-        registrar(Paso("limite", f"recursion_limit={RECURSION_LIMIT} alcanzado; se corta el ciclo"))
-    return turno
+def guardar(traza: Traza, destino_json: Path, destino_log: Path, *, modelo: str = "") -> None:
+    """Escribe la traza como JSON (maquina) y como texto legible (humano)."""
+    destino_json.parent.mkdir(parents=True, exist_ok=True)
+    datos = asdict(traza) | {"ruta": traza.ruta, "modelo": modelo}
+    destino_json.write_text(json.dumps(datos, ensure_ascii=False, indent=2), encoding="utf-8")
+    cabecera = f"Pregunta: {traza.pregunta}\nRuta: {' -> '.join(traza.ruta)}\n{'=' * 70}\n"
+    destino_log.write_text(cabecera + "\n\n".join(formatear_evento(e) for e in traza.eventos) + "\n", encoding="utf-8")

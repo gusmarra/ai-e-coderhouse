@@ -1,4 +1,4 @@
-"""Configuracion central: variables de entorno y limites del agente."""
+"""Configuracion central: variables de entorno y limites del orquestador."""
 
 from __future__ import annotations
 
@@ -8,27 +8,44 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 __all__ = [
-    "MAX_MENSAJES_CONTEXTO",
+    "DATA_DIR",
+    "EMBEDDING_DIMENSION",
+    "MAX_PASOS",
+    "MAX_REFINAMIENTOS",
     "RECURSION_LIMIT",
     "TRAZAS_DIR",
-    "ruta_checkpoints",
+    "nombre_indice",
+    "nombre_namespace",
 ]
 
 ROOT = Path(__file__).parent
+DATA_DIR = ROOT / "data"
 TRAZAS_DIR = ROOT / "trazas"
 
 load_dotenv(ROOT / ".env")
 
-#: Techo de "super-pasos" del grafo por invocacion. Cada vuelta modelo -> herramienta
-#: -> modelo gasta 2 pasos, asi que 10 alcanza para ~4 llamadas a herramientas.
-#: Sin este tope, un modelo que se queda llamando herramientas en loop quema la API.
-RECURSION_LIMIT = 10
+#: Antidoto contra el "Supervisor Infinito" (1/3): maximo de turnos de especialistas por tarea.
+#: Al llegar, el supervisor deja de delegar y manda lo que hay a sintesis.
+MAX_PASOS = 6
 
-#: Cuantos mensajes (como maximo) le mostramos al modelo en cada llamada. El estado
-#: guardado en SQLite conserva TODO el historial; solo recortamos lo que se envia.
-MAX_MENSAJES_CONTEXTO = 30
+#: Antidoto (2/3): cuantas veces se puede volver a llamar al MISMO especialista tras su
+#: primera pasada. Con 1, cada uno tiene una oportunidad de refinar y nada mas.
+MAX_REFINAMIENTOS = 1
+
+#: Antidoto (3/3), la red de seguridad de LangGraph: tope duro de super-pasos por invocacion.
+#: Cada turno de especialista gasta 2 (supervisor + especialista); sobra margen para MAX_PASOS
+#: mas la sintesis. Si algo se escapa de las reglas anteriores, LangGraph corta con un error.
+RECURSION_LIMIT = 2 * MAX_PASOS + 6
+
+#: Dimension del indice de Pinecone de la pre-entrega 4 (tiene que coincidir con la de la ingesta).
+EMBEDDING_DIMENSION = 1536
+
+_INDICE_POR_DEFECTO = "hotel-bahia-serena"
 
 
-def ruta_checkpoints() -> Path:
-    """Archivo SQLite donde el checkpointer guarda el estado de cada thread."""
-    return Path(os.getenv("CHECKPOINT_DB") or ROOT / "checkpoints.sqlite")
+def nombre_indice() -> str:
+    return os.getenv("INDEX_NAME") or _INDICE_POR_DEFECTO
+
+
+def nombre_namespace() -> str:
+    return os.getenv("PINECONE_NAMESPACE") or _INDICE_POR_DEFECTO

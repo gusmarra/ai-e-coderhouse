@@ -1,0 +1,45 @@
+Pregunta: Un huesped reservo 4 noches a USD 150 la noche con tarifa de temporada alta y cancela 3 dias antes del check-in. Segun la politica del hotel, ¿cuanto tendria que pagar de penalidad y que plazo tenia para cancelar sin cargo?
+Ruta: supervisor -> investigador -> supervisor -> analista -> supervisor -> sintesis
+======================================================================
+[SUPERVISOR]
+  -> investigador · Se requiere consultar las politicas oficiales del hotel para obtener las reglas de cancelacion y plazos. · consigna: Busca en la politica de cancelaciones y reservas del hotel las reglas para cancelacion en temporada alta, los plazos para cancelar sin cargo y las penalidades correspondientes.
+
+[INVESTIGADOR] herramientas: buscar_en_documentos_hotel
+  consigna: Busca en la politica de cancelaciones y reservas del hotel las reglas para cancelacion en temporada alta, los plazos para cancelar sin cargo y las penalidades correspondientes.
+  - **Plazo para cancelar sin cargo en tarifa de temporada alta**: Hasta 7 días antes del check-in (fuente: politica-reservas-cancelaciones.md, seccion 4).
+  - **Penalidad fuera de plazo en tarifa de temporada alta**: Cargo del 50% de la estadía reservada (fuente: politica-reservas-cancelaciones.md, seccion 4).
+
+[SUPERVISOR]
+  -> analista · Se cumple la fuente del investigador y ahora el analista debe realizar el computo exacto segun el punto 3 de la rubrica. · consigna: Calcula el monto exacto de la penalidad sabiendo que son 4 noches a USD 150 la noche y la politica indica un cargo del 50% de la estadia reservada (segun los datos del investigador).
+
+[ANALISTA] herramientas: calcular
+  consigna: Calcula el monto exacto de la penalidad sabiendo que son 4 noches a USD 150 la noche y la politica indica un cargo del 50% de la estadia reservada (segun los datos del investigador).
+  **Penalidad:** USD 300
+  **Plazo para cancelar sin cargo:** Hasta 7 días antes del check-in.
+  
+  ---
+  
+  ### **Desarrollo y datos utilizados:**
+  
+  1. **Datos de la reserva y política:**
+     - **Cantidad de noches:** 4 (pedido original).
+     - **Precio por noche:** USD 150 (pedido original).
+     - **Estadía total:** $4 \times 150 = 600$ USD.
+     - **Porcentaje de penalidad:** 50% (fuente: *politica-reservas-cancelaciones.md, seccion 4*).
+     - **Plazo límite sin cargo:** Hasta 7 días antes del check-in en temporada alta (fuente: *politica-reservas-cancelaciones.md, seccion 4*). Como el huésped canceló a los 3 días, está fuera de plazo y corresponde aplicar el cargo.
+  
+  2. **Cálculo de la penalidad:**
+     $$\text{Penalidad} = \text{Cantidad de noches} \times \text{Precio por noche} \times \text{Porcentaje}$$
+     $$\text{Penalidad} = 4 \times 150 \times 0.5$$
+     $$\text{Penalidad} = \text{USD } 300$$
+
+[SUPERVISOR]
+  -> FINISH · Se cumplen todos los puntos de la rubrica de suficiencia: fuentes verificadas, completitud, computo correcto y consistencia de cifras.
+
+[SINTESIS]
+  El huésped tendría que pagar una penalidad de **USD 300** y el plazo que tenía para cancelar sin cargo era hasta **7 días antes del check-in** (politica-reservas-cancelaciones.md, seccion 4).
+  
+  **Detalle del cálculo:**
+  * Estadía total: $4 \text{ noches} \times \text{USD } 150 = \text{USD } 600$
+  * Porcentaje de penalidad por temporada alta: 50% (politica-reservas-cancelaciones.md, seccion 4)
+  * Cuenta: $\text{USD } 600 \times 0.50 = \text{USD } 300$

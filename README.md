@@ -1,16 +1,91 @@
-# Pre-entrega 5 — Agente de razonamiento cíclico con memoria persistente
+# Pre-entrega 6 — Orquestador multi-agente especializado
 
-Agente **ReAct** (Reason + Act) construido con **LangGraph**: un LLM que decide por sí
-mismo cuándo llamar a una herramienta, observa el resultado, y vuelve a razonar hasta tener
-la respuesta. El estado de cada conversación se guarda en **SQLite** (`AsyncSqliteSaver`),
-así que con el mismo `thread_id` el agente recuerda lo hablado, incluso después de
-reiniciar el proceso.
+Un **Supervisor** (router + controlador de flujo) coordina a dos especialistas sobre la base de
+conocimiento del **Hotel Bahía Serena** (la de las pre-entregas 3 y 4):
 
-El dominio es una base simulada de **clientes y pedidos** (la del ejemplo de la consigna).
+| Agente | Rol | Herramientas (acotadas a su rol) |
+|---|---|---|
+| **Supervisor** | Decide quién interviene, valida con una rúbrica y cierra. | — (salida estructurada `Decision`) |
+| **Investigador** | Encuentra datos en los documentos del hotel. No calcula. | `buscar_en_documentos_hotel` (BM25 + Pinecone), `listar_documentos_hotel` |
+| **Analista** | Procesa los datos ya recopilados. No accede a los documentos. | `calcular`, `extraer_cifras`, `analizar_sentimiento` |
+| **Síntesis** | Redacta la respuesta final a partir de los hallazgos. | — |
 
-## Cómo levantar el entorno
+Ejemplo (el de la demo): *"Reservó 4 noches a USD 150 con tarifa de temporada alta y cancela 3 días
+antes. ¿Cuánto paga de penalidad y qué plazo tenía para cancelar sin cargo?"* → el investigador
+encuentra la regla (50 % de la estadía; plazo de 7 días), el analista calcula USD 300 y el supervisor
+cierra.
 
-Requiere **Python 3.12+** (el CI corre 3.12 y 3.13; se desarrolló en 3.14).
+## Topología
+
+```mermaid
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	supervisor(supervisor)
+	investigador(investigador)
+	analista(analista)
+	sintesis(sintesis)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> supervisor;
+	analista --> supervisor;
+	investigador --> supervisor;
+	supervisor -.-> analista;
+	supervisor -.-> investigador;
+	supervisor -.-> sintesis;
+	sintesis --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+```
+
+Generado desde el grafo real con `python main.py diagrama` (escribe `docs/grafo.mmd` y
+`docs/grafo.png`, este último vía `draw_mermaid_png()`). Las líneas punteadas son las aristas
+condicionales: las decide el supervisor en tiempo de ejecución.
+
+![grafo](docs/grafo.png)
+
+### ¿Por qué esta topología?
+
+**Jerárquica en estrella (hub-and-spoke)**: los especialistas nunca se hablan entre sí; todo pasa
+por el supervisor. Frente a las alternativas:
+
+- *Cadena fija* (investigador → analista → fin): no puede refinar ni saltear pasos. Una consulta
+  que solo pide un dato no necesita analista.
+- *Red de agentes que se llaman entre sí*: el flujo es difícil de seguir y de acotar; dos agentes
+  pueden entrar en un bucle de correcciones sin que nadie lo vea.
+- *Estrella*: hay **un solo punto de decisión y de control** (dónde se valida, dónde se corta). Es
+  más barato en tokens, auditable (cada turno queda registrado) y escala agregando un nodo
+  especialista y una opción en el `Literal` del supervisor.
+
+### Cómo se manejan los conflictos y los bucles
+
+| Riesgo | Mecanismo |
+|---|---|
+| **Supervisor infinito** | Tres frenos en capas: `MAX_PASOS` (turnos de especialistas), `MAX_REFINAMIENTOS` (cuántas veces se puede reabrir al *mismo* especialista) y `recursion_limit` de LangGraph como red de seguridad. Al alcanzar un tope, el supervisor fuerza `FINISH`. Las guardas viven en código (`aplicar_guardas`), no en el prompt: el LLM no puede saltárselas. |
+| **El analista y el investigador "no coinciden"** | La rúbrica del supervisor exige **consistencia** (las cifras del analista deben coincidir con las del investigador). Si no, el supervisor devuelve el trabajo al responsable con una consigna de refinamiento concreta. No discuten entre ellos: arbitra el supervisor. |
+| **Analista sin datos / cierre sin investigar** | Guardas deterministas: redirige a `investigador`. |
+| **Pérdida de contexto** | `hallazgos` y `contribuciones` tienen reducers explícitos (`fusionar_hallazgos`, `operator.add`): lo que escribe un agente no pisa lo de otro. |
+| **Contaminación de contexto** | Cada especialista corre como agente ReAct **aislado** y recibe solo *consigna + pedido original + los hallazgos que necesita*; no ve el historial, ni las llamadas a herramientas de otros. El supervisor ve los hallazgos y sus fuentes, no las trazas de herramientas. |
+| **Alucinación** | El investigador solo responde con lo que devuelve la búsqueda y cita archivo y sección; la rúbrica exige fuentes. El analista no tiene acceso a los documentos: si falta un dato, lo dice. |
+| **Servicio externo caído** | Si no hay `PINECONE_API_KEY` (o Pinecone/embeddings fallan), la búsqueda degrada a BM25 local con un aviso. |
+
+## Estructura
+
+| Archivo | Rol |
+|---|---|
+| `state.py` | `EstadoOrquestador(MessagesState)`: `next_agent`, `instruccion`, `hallazgos`, `contribuciones`, `pasos`, `task_completed`, `respuesta_final`. |
+| `agents/research_agent.py` | Investigador: prompt, tools y entrada acotada. |
+| `agents/analyst_agent.py` | Analista: `calcular` (evaluador aritmético seguro con `ast`, sin `eval`), `extraer_cifras`, `analizar_sentimiento`. |
+| `agents/supervisor.py` | `Decision` (salida estructurada), prompt con **rúbrica**, `aplicar_guardas`, nodo de síntesis. |
+| `agents/common.py` | Envoltorio común: ejecuta un `create_react_agent` aislado y vuelca el resultado al estado. |
+| `graph.py` | `StateGraph`, nodos, arista condicional (`enrutar` con retorno `Literal`) y estado inicial. |
+| `base_hotel.py` | Corpus `data/*.md`, chunking y recuperador híbrido (BM25 + Pinecone) de las pre-entregas 3 y 4. |
+| `trazas.py`, `main.py` | Runner que reconstruye la traza de delegación; CLI. |
+| `demo.ipynb`, `trazas/` | Demo del flujo de delegación (salidas de una corrida real). |
+| `tests/` | 28 tests offline (LLM guionado): herramientas, flujo completo, refinamiento, aislamiento de contexto, supervisor infinito, guardas. |
+
+## Cómo correrlo
+
+Requiere **Python 3.12+**.
 
 ```bash
 python -m venv .venv
@@ -20,121 +95,34 @@ cp .env.example .env              # y completar GEMINI_API_KEY (u OPENAI_API_KEY
 ```
 
 > Las API keys viven **solo** en `.env`, que está en `.gitignore`. Nunca se suben.
+> Para usar la búsqueda híbrida, agregá `PINECONE_API_KEY` (e `INDEX_NAME`) al `.env`: el índice es
+> el de la pre-entrega 4. Sin eso, el investigador usa solo BM25 local sobre `data/`.
 
 ```bash
-python main.py demo                                   # corre los escenarios y escribe trazas/
-python main.py preguntar "¿Cuántos pedidos tuvo Laura Gómez?" --thread-id ana
-python main.py preguntar "¿Y el último?" --thread-id ana   # mismo thread: recuerda a Laura
-python main.py chat --thread-id ana                   # conversación interactiva
+python main.py demo                       # la consulta de la consigna; guarda trazas/traza_demo.{json,log}
+python main.py preguntar "¿Cuánto cuesta el late check-out pasadas las 13:00?"
+python main.py diagrama                   # regenera docs/grafo.mmd y docs/grafo.png
 ```
 
-Tests (offline: usan un LLM guionado, no necesitan red ni keys):
+Tests (no necesitan red ni keys):
 
 ```bash
 pip install -r requirements-dev.txt
-pytest && ruff check . && mypy *.py tests
+pytest && ruff check . && mypy *.py agents tests
 ```
 
-> **Free tier de Gemini:** corta a ~5 requests por minuto y 20 por día *por modelo*. Definí
-> `LLM_RPM=4` en `.env` para que un rate limiter espacie las llamadas, y si un modelo se
-> agota probá otro con `LLM_MODEL=gemini-3.5-flash-lite` (la cuota es por modelo).
+> **Free tier de Gemini:** una consulta completa son ~10 requests (supervisor ×3, síntesis y los
+> ciclos ReAct de cada especialista). Con `LLM_RPM=4` un rate limiter compartido espacia las
+> llamadas; si un modelo agota su cuota diaria, probá otro con `LLM_MODEL=gemini-3.5-flash-lite`.
 
-## Estructura
+## Criterios de la consigna → dónde se cumplen
 
-| Archivo | Rol |
+| Requisito | Dónde |
 |---|---|
-| `herramientas.py` | **Fase 1.** Dos tools con `@tool`: `buscar_cliente` y `buscar_pedidos` (async, con errores accionables). |
-| `grafo.py` | **Fases 2 y 3.** `EstadoAgente(MessagesState)`, nodo `modelo`, `ToolNode`, `tools_condition` y el checkpointer. |
-| `trazas.py` | Corre un turno con `recursion_limit` y reconstruye la traza Pensamiento → Acción → Observación → Respuesta. |
-| `demo.py` | Escenarios reproducibles que generan `trazas/traza_ejemplo.{json,log}`. |
-| `llm.py`, `config.py` | Factory del modelo (Gemini/OpenAI), `.env`, límites. |
-| `main.py` | CLI: `demo`, `preguntar`, `chat`. |
-| `tests/` | 15 tests offline: herramientas, ciclo ReAct, reintento tras error, memoria, `recursion_limit`. |
-
-## Criterios de aceptación → dónde se cumplen
-
-| Criterio | Cómo |
-|---|---|
-| **Autonomía** (sin `if/else` manual) | La ruta la decide `tools_condition` leyendo si el último `AIMessage` trae `tool_calls`. No hay ningún `if` en el código que elija herramientas. |
-| **Ciclo de retorno** | La arista `tools → modelo` devuelve el resultado (también los errores) al LLM. Test: `test_ciclo_de_retorno_el_error_vuelve_al_modelo_que_reintenta`. En la traza real, ante un id inexistente o un apellido ambiguo el agente **pide aclaraciones**. |
-| **Resiliencia de estado** | `AsyncSqliteSaver` + `thread_id`. La demo cierra y reabre el archivo SQLite entre preguntas del mismo thread. |
-| **Código limpio** | Python ≥ 3.12, type hints (`mypy` sin errores), `asyncio` de punta a punta, `ruff` limpio. |
-
-## Traza de ejecución (ciclo ReAct real)
-
-Generada con `gemini-3.5-flash-lite`; completa en [`trazas/traza_ejemplo.log`](trazas/traza_ejemplo.log)
-y [`trazas/traza_ejemplo.json`](trazas/traza_ejemplo.json).
-
-```text
-=== thread_id=demo-multipaso ===
-
-Usuario: ¿Cuántos pedidos tuvo Laura Gómez y cuál fue el total?
-  ACCION      buscar_cliente({'nombre': 'Laura Gomez'})
-  OBSERVACION {"cantidad": 1, "coincidencias": [{"cliente_id": 102, "nombre": "Laura Gómez"}]}
-  ACCION      buscar_pedidos({'cliente_id': 102})
-  OBSERVACION {"cliente_id": 102, "cliente": "Laura Gómez", "cantidad_pedidos": 3, "total": 14500, ...}
-  RESPUESTA   Laura Gómez tuvo 3 pedidos y el total gastado fue de $14.500.
-
-Usuario: ¿Y el último?
-  ACCION      buscar_pedidos({'cliente_id': 102})
-  RESPUESTA   El último pedido fue el N° 5003, realizado el 18/09/2026 por $4.000, y su estado actual es "en camino".
-
-  ... se cierra el checkpointer y se reabre el archivo (reinicio simulado) ...
-
-Usuario: Cambiando de tema un segundo: ¿de qué clienta estábamos hablando y cuánto era su total?
-  RESPUESTA   Estábamos hablando de Laura Gómez, y su total gastado es de $14.500.
-
-=== thread_id=demo-errores ===
-
-Usuario: ¿Cuántos pedidos tuvo el cliente 999?
-  ACCION      buscar_pedidos({'cliente_id': 999})
-  OBSERVACION {"error": "No existe un cliente con id 999.", ...} [ERROR]
-  RESPUESTA   No encontré ningún cliente con el ID 999. ¿Tenés el nombre o apellido del cliente para que lo busque?
-```
-
-La primera pregunta usa la herramienta **dos veces** (razonamiento multi-paso): el agente
-necesita el `cliente_id`, por eso primero busca por nombre y recién después consulta los pedidos.
-Las respuestas de un LLM no son deterministas: otra corrida puede variar el orden o la redacción.
-
-## Cómo funciona, paso a paso
-
-**1. El contrato de herramientas (`herramientas.py`).** Una tool es una función con `@tool`.
-El LLM nunca ve el código: solo el nombre, los tipos de los parámetros y el *docstring*. Por eso
-cada docstring dice *cuándo* usarla, *qué devuelve* y *qué hacer si falla*. Si el agente no usa
-la herramienta esperada, el problema casi siempre está ahí, no en el grafo.
-
-**2. El estado (`EstadoAgente`).** Hereda de `MessagesState`, que ya trae
-`messages: Annotated[list[AnyMessage], add_messages]`. El *reducer* `add_messages` hace que un
-nodo **agregue** mensajes en vez de pisar la lista (hace lo que `operator.add`, y además
-actualiza por id). Un nodo devuelve solo lo nuevo: `{"messages": [respuesta]}`.
-
-**3. El grafo (`construir_grafo`).**
-
-```text
-START → modelo ──(tools_condition)──→ tools
-          ↑                              │
-          └──────────────────────────────┘
-          └─(sin tool_calls)→ END
-```
-
-`modelo` llama al LLM con `llm.bind_tools(...)`. `tools_condition` lee el último mensaje: si
-pidió herramientas va a `tools` (un `ToolNode` que las ejecuta y agrega `ToolMessage`s), si no
-termina. El ciclo `tools → modelo` es lo que hace "cíclico" al agente.
-
-**4. La persistencia.** `graph.compile(checkpointer=AsyncSqliteSaver)` guarda el estado después
-de cada paso. Al invocar con `{"configurable": {"thread_id": "ana"}}`, LangGraph carga el estado
-de ese hilo y le *suma* el mensaje nuevo; otro `thread_id` arranca de cero. Usamos
-`AsyncSqliteSaver` y no `SqliteSaver` porque el agente es asíncrono (`ainvoke`/`astream`): el
-saver síncrono no soporta métodos async. Es el mismo almacenamiento SQLite, versión `aiosqlite`.
-
-**5. Protecciones contra los errores comunes.**
-
-- *Bucles infinitos*: `recursion_limit=10` en cada invocación (`config.py`). Si el modelo no
-  converge, `GraphRecursionError` se captura y el turno termina con un mensaje claro
-  (test: `test_recursion_limit_corta_un_loop_infinito`).
-- *Estado sucio*: el estado guardado crece con cada turno, pero `recortar_contexto` limita
-  lo que se **envía** al modelo (últimos 30 mensajes, empezando siempre en un mensaje del
-  usuario para no dejar un `ToolMessage` huérfano). El historial completo queda en SQLite.
-- *Excepciones en tools*: `ToolNode(handle_tool_errors=True)` las convierte en un `ToolMessage`
-  de error, así el modelo puede reintentar en vez de romper el grafo.
-- *Descripciones vagas*: un test verifica que cada herramienta tenga un docstring sustancial.
+| Topología jerárquica con nodo Supervisor | `graph.py`, `agents/supervisor.py` |
+| ≥ 2 especialistas con tools funcionales | `agents/research_agent.py` (DB del hotel), `agents/analyst_agent.py` |
+| Estado compartido que rastrea quién aportó qué | `state.py`: `hallazgos` + `contribuciones` |
+| Supervisor decide si está completo o hay que refinar | `Decision` + rúbrica en `PROMPT_SUPERVISOR`; test `test_refinamiento_*` |
+| Aristas condicionales con `Literal` | `graph.enrutar` y `state.Siguiente` |
+| Validación antes del `END` | Rúbrica de 4 puntos (fuentes, completitud, cómputo, consistencia) |
+| Evitar el supervisor infinito / contaminación de contexto | Ver tabla de arriba; tests `test_supervisor_infinito_*` y `test_el_analista_recibe_la_consigna_y_los_datos_no_el_historial` |
