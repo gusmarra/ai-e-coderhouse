@@ -23,8 +23,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from config import MAX_PASOS, MAX_REFINAMIENTOS
-from state import AGENTES, FINISH, EstadoOrquestador, Siguiente
+from app.config import MAX_PASOS, MAX_REFINAMIENTOS
+from app.state import AGENTES, FINISH, EstadoOrquestador, Siguiente
 
 __all__ = [
     "PROMPT_SINTESIS",
@@ -42,7 +42,7 @@ class Decision(BaseModel):
     """Salida estructurada del supervisor: se mapea 1 a 1 con los nodos del grafo."""
 
     siguiente: Siguiente = Field(
-        description="'investigador', 'analista' o 'FINISH' si la rubrica se cumple y se puede cerrar."
+        description="'investigador', 'analista', 'ejecutor' o 'FINISH' si la rubrica se cumple y se puede cerrar."
     )
     instruccion: str = Field(
         default="",
@@ -55,7 +55,7 @@ class Decision(BaseModel):
 
 
 PROMPT_SUPERVISOR = """\
-Sos el SUPERVISOR de un equipo de dos especialistas que responde consultas sobre el Hotel Bahia Serena.
+Sos el SUPERVISOR de un equipo de tres especialistas que responde consultas sobre el Hotel Bahia Serena.
 Dada la conversacion actual, decidis QUIEN debe intervenir ahora o si es momento de FINALIZAR.
 
 Equipo:
@@ -63,10 +63,16 @@ Equipo:
   Es el unico que accede a los datos. No calcula ni valora.
 - analista: procesa datos que ya tiene el investigador: calculos exactos, extraccion de cifras,
   tono/sentimiento. No accede a los documentos.
+- ejecutor: realiza acciones con EFECTOS REALES (hoy: cancelar una reserva y cobrar la penalidad).
+  Solo se lo llama si el usuario PIDE EXPLICITAMENTE ejecutar la accion y ya hay un codigo de
+  reserva. Antes de que actue, un humano tiene que aprobarla: el sistema lo gestiona solo.
 
 Flujo normal: investigador -> analista (solo si el pedido requiere calculo o valoracion) -> FINISH.
 - Pedido solo de consulta (sin calculo ni valoracion): investigador -> FINISH.
-- Nunca llames al analista si todavia no hay datos del investigador.
+- Pedido de ejecutar una cancelacion: investigador (politica) -> analista (penalidad) -> ejecutor -> FINISH.
+  La consigna al ejecutor incluye codigo de reserva y penalidad exacta. Nunca ejecutes por tu cuenta
+  algo que el usuario solo consulto ("¿cuanto pagaria si cancelo?" NO es un pedido de cancelar).
+- Nunca llames al analista ni al ejecutor si todavia no hay datos del investigador.
 - Cada consigna debe ser concreta y autocontenida: el especialista NO ve la charla completa,
   solo tu consigna y los datos que necesita.
 
@@ -77,7 +83,8 @@ RUBRICA DE SUFICIENCIA (para elegir FINISH tienen que cumplirse TODOS los puntos
 2. COMPLETITUD: cada parte del pedido original tiene respuesta (nada quedo sin cubrir).
 3. COMPUTO: si el pedido incluye cuentas, totales, porcentajes o valoraciones, el analista
    corrio y muestra la formula con numeros y el resultado.
-4. CONSISTENCIA: las cifras del analista coinciden con las del investigador (mismos montos,
+4. ACCION: si el pedido incluia ejecutar algo, el ejecutor corro (o un humano la rechazo).
+5. CONSISTENCIA: las cifras del analista coinciden con las del investigador (mismos montos,
    porcentajes y plazos); no hay supuestos que el investigador no respalde.
 
 Si falla un punto, delega al responsable con una consigna de REFINAMIENTO que diga exactamente
@@ -118,11 +125,11 @@ def aplicar_guardas(decision: Decision, estado: EstadoOrquestador) -> Decision:
 
     if siguiente != FINISH and pasos >= MAX_PASOS:
         return Decision(siguiente=FINISH, razon=f"[guarda] tope de {MAX_PASOS} turnos: cierro con lo que hay.")
-    if siguiente == "analista" and "investigador" not in hallazgos:
+    if siguiente in ("analista", "ejecutor") and "investigador" not in hallazgos:
         return Decision(
             siguiente="investigador",
             instruccion=estado["pregunta"],
-            razon="[guarda] el analista no puede trabajar sin datos: primero investigar.",
+            razon="[guarda] el analista y el ejecutor no pueden trabajar sin datos: primero investigar.",
         )
     if siguiente == FINISH and "investigador" not in hallazgos:
         return Decision(
@@ -130,6 +137,8 @@ def aplicar_guardas(decision: Decision, estado: EstadoOrquestador) -> Decision:
             instruccion=estado["pregunta"],
             razon="[guarda] no se cierra sin haber consultado los documentos del hotel.",
         )
+    if siguiente == "ejecutor" and _veces(estado, "ejecutor") >= 1:  # un efecto secundario nunca se repite
+        return Decision(siguiente=FINISH, razon="[guarda] la accion critica ya se ejecuto: no se repite.")
     if siguiente in AGENTES and _veces(estado, siguiente) >= 1 + MAX_REFINAMIENTOS:
         return Decision(
             siguiente=FINISH,

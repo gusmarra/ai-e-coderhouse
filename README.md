@@ -1,128 +1,162 @@
-# Pre-entrega 6 — Orquestador multi-agente especializado
+# Pre-entrega 7 — API de producción y monitoreo activo
 
-Un **Supervisor** (router + controlador de flujo) coordina a dos especialistas sobre la base de
-conocimiento del **Hotel Bahía Serena** (la de las pre-entregas 3 y 4):
+API REST (FastAPI) que expone el orquestador multi-agente del módulo 6 (Supervisor + Investigador +
+Analista sobre la base del **Hotel Bahía Serena**) con cuatro capacidades nuevas:
 
-| Agente | Rol | Herramientas (acotadas a su rol) |
-|---|---|---|
-| **Supervisor** | Decide quién interviene, valida con una rúbrica y cierra. | — (salida estructurada `Decision`) |
-| **Investigador** | Encuentra datos en los documentos del hotel. No calcula. | `buscar_en_documentos_hotel` (BM25 + Pinecone), `listar_documentos_hotel` |
-| **Analista** | Procesa los datos ya recopilados. No accede a los documentos. | `calcular`, `extraer_cifras`, `analizar_sentimiento` |
-| **Síntesis** | Redacta la respuesta final a partir de los hallazgos. | — |
+| Capacidad | Dónde |
+|---|---|
+| Endpoints asíncronos: `POST /tasks` encola y devuelve un `job_id` al instante | [app/main.py](app/main.py), [app/worker.py](app/worker.py) |
+| Estado de los jobs y checkpoints de LangGraph en **Redis** (`PENDING/RUNNING/AWAITING_APPROVAL/DONE/FAILED`) | [app/jobs.py](app/jobs.py), `checkpointer_redis` en [app/graph.py](app/graph.py) |
+| Observabilidad: trazas de cada nodo y llamada al LLM en **Arize Phoenix** (o LangSmith) | [app/observability.py](app/observability.py) |
+| **Human-in-the-loop**: pausa obligatoria antes de acciones con efectos secundarios | [app/hitl.py](app/hitl.py), [app/agents/executor_agent.py](app/agents/executor_agent.py) |
 
-Ejemplo (el de la demo): *"Reservó 4 noches a USD 150 con tarifa de temporada alta y cancela 3 días
-antes. ¿Cuánto paga de penalidad y qué plazo tenía para cancelar sin cargo?"* → el investigador
-encuentra la regla (50 % de la estadía; plazo de 7 días), el analista calcula USD 300 y el supervisor
-cierra.
+La pre-entrega 6 original quedó intacta en `entregas/clase_6/` (carpeta local, fuera de git).
 
-## Topología
+## Arquitectura
+
+```
+cliente ── POST /tasks ──► FastAPI ──► Redis: job:<id> = PENDING ──► asyncio.Queue
+   ▲                          │                                          │
+   │  GET /tasks/{id}         │                              N consumidores (worker)
+   └──────── Redis ◄──────────┴──── RUNNING/DONE/FAILED ◄── grafo.ainvoke(thread_id=job_id)
+                                                                │  checkpoints ──► Redis (AsyncRedisSaver)
+                                                                └  spans ──► Phoenix / LangSmith
+```
+
+* **No bloquea el event loop**: el endpoint solo escribe en Redis (`redis.asyncio`) y pone el job en
+  una cola; el worker usa `grafo.ainvoke` (async nativo). No hay llamadas sync a LLM ni a Redis.
+* **Errores en segundo plano**: `Worker._ejecutar` captura *cualquier* excepción (LLM caído,
+  `recursion_limit`, timeout de `JOB_TIMEOUT_S`, apagado de la API) y deja el job en `FAILED` con el
+  error. El cliente que hace polling siempre llega a un estado final o de espera.
+* **Worker**: la versión de un solo proceso (consumidores `asyncio`). El contrato (estado y
+  checkpoints en Redis, `thread_id = job_id`) permite pasarlo a Arq/Celery sin tocar el grafo.
+
+### Flujo Human-in-the-loop
 
 ```mermaid
 graph TD;
-	__start__([<p>__start__</p>]):::first
-	supervisor(supervisor)
-	investigador(investigador)
-	analista(analista)
-	sintesis(sintesis)
-	__end__([<p>__end__</p>]):::last
-	__start__ --> supervisor;
-	analista --> supervisor;
-	investigador --> supervisor;
-	supervisor -.-> analista;
-	supervisor -.-> investigador;
-	supervisor -.-> sintesis;
-	sintesis --> __end__;
-	classDef default fill:#f2f0ff,line-height:1.2
-	classDef first fill-opacity:0
-	classDef last fill:#bfb6fc
+	__start__([__start__]) --> supervisor(supervisor)
+	supervisor -.-> investigador(investigador)
+	supervisor -.-> analista(analista)
+	supervisor -.-> aprobacion{{aprobacion · interrupt}}
+	supervisor -.-> sintesis(sintesis)
+	investigador --> supervisor
+	analista --> supervisor
+	aprobacion -.->|aprobada| ejecutor(ejecutor)
+	aprobacion -.->|rechazada| sintesis
+	ejecutor --> supervisor
+	sintesis --> __end__([__end__])
 ```
 
-Generado desde el grafo real con `python main.py diagrama` (escribe `docs/grafo.mmd` y
-`docs/grafo.png`, este último vía `draw_mermaid_png()`). Las líneas punteadas son las aristas
-condicionales: las decide el supervisor en tiempo de ejecución.
+(El diagrama generado desde el grafo real está en [docs/grafo.mmd](docs/grafo.mmd).)
 
-![grafo](docs/grafo.png)
+**Tarea crítica** = la que implica la herramienta `cancelar_reserva` (efecto real e irreversible:
+cancela y cobra una penalidad). El supervisor solo puede llegar al `ejecutor` a través del nodo
+`aprobacion` (el router `enrutar` lo fuerza: `ejecutor → aprobacion`), que llama a `interrupt()`:
 
-### ¿Por qué esta topología?
+1. El grafo se congela y su estado queda en Redis; el job pasa a `AWAITING_APPROVAL` y
+   `GET /tasks/{id}` devuelve en `pendiente` qué acción espera aprobación.
+2. `POST /tasks/{id}/approve` con `{"aprobado": true|false, "comentario": "..."}` reanuda el mismo
+   `thread_id` con `Command(resume=...)`. Aprobada → corre el ejecutor; rechazada → se cierra sin
+   ejecutar nada. La transición `AWAITING_APPROVAL → PENDING` es atómica (`WATCH/MULTI`): dos
+   aprobaciones simultáneas no ejecutan dos veces (la segunda recibe `409`), y una guarda
+   determinística impide que el ejecutor corra más de una vez por tarea.
 
-**Jerárquica en estrella (hub-and-spoke)**: los especialistas nunca se hablan entre sí; todo pasa
-por el supervisor. Frente a las alternativas:
+## Cómo levantarlo
 
-- *Cadena fija* (investigador → analista → fin): no puede refinar ni saltear pasos. Una consulta
-  que solo pide un dato no necesita analista.
-- *Red de agentes que se llaman entre sí*: el flujo es difícil de seguir y de acotar; dos agentes
-  pueden entrar en un bucle de correcciones sin que nadie lo vea.
-- *Estrella*: hay **un solo punto de decisión y de control** (dónde se valida, dónde se corta). Es
-  más barato en tokens, auditable (cada turno queda registrado) y escala agregando un nodo
-  especialista y una opción en el `Literal` del supervisor.
-
-### Cómo se manejan los conflictos y los bucles
-
-| Riesgo | Mecanismo |
-|---|---|
-| **Supervisor infinito** | Tres frenos en capas: `MAX_PASOS` (turnos de especialistas), `MAX_REFINAMIENTOS` (cuántas veces se puede reabrir al *mismo* especialista) y `recursion_limit` de LangGraph como red de seguridad. Al alcanzar un tope, el supervisor fuerza `FINISH`. Las guardas viven en código (`aplicar_guardas`), no en el prompt: el LLM no puede saltárselas. |
-| **El analista y el investigador "no coinciden"** | La rúbrica del supervisor exige **consistencia** (las cifras del analista deben coincidir con las del investigador). Si no, el supervisor devuelve el trabajo al responsable con una consigna de refinamiento concreta. No discuten entre ellos: arbitra el supervisor. |
-| **Analista sin datos / cierre sin investigar** | Guardas deterministas: redirige a `investigador`. |
-| **Pérdida de contexto** | `hallazgos` y `contribuciones` tienen reducers explícitos (`fusionar_hallazgos`, `operator.add`): lo que escribe un agente no pisa lo de otro. |
-| **Contaminación de contexto** | Cada especialista corre como agente ReAct **aislado** y recibe solo *consigna + pedido original + los hallazgos que necesita*; no ve el historial, ni las llamadas a herramientas de otros. El supervisor ve los hallazgos y sus fuentes, no las trazas de herramientas. |
-| **Alucinación** | El investigador solo responde con lo que devuelve la búsqueda y cita archivo y sección; la rúbrica exige fuentes. El analista no tiene acceso a los documentos: si falta un dato, lo dice. |
-| **Servicio externo caído** | Si no hay `PINECONE_API_KEY` (o Pinecone/embeddings fallan), la búsqueda degrada a BM25 local con un aviso. |
-
-## Estructura
-
-| Archivo | Rol |
-|---|---|
-| `state.py` | `EstadoOrquestador(MessagesState)`: `next_agent`, `instruccion`, `hallazgos`, `contribuciones`, `pasos`, `task_completed`, `respuesta_final`. |
-| `agents/research_agent.py` | Investigador: prompt, tools y entrada acotada. |
-| `agents/analyst_agent.py` | Analista: `calcular` (evaluador aritmético seguro con `ast`, sin `eval`), `extraer_cifras`, `analizar_sentimiento`. |
-| `agents/supervisor.py` | `Decision` (salida estructurada), prompt con **rúbrica**, `aplicar_guardas`, nodo de síntesis. |
-| `agents/common.py` | Envoltorio común: ejecuta un `create_react_agent` aislado y vuelca el resultado al estado. |
-| `graph.py` | `StateGraph`, nodos, arista condicional (`enrutar` con retorno `Literal`) y estado inicial. |
-| `base_hotel.py` | Corpus `data/*.md`, chunking y recuperador híbrido (BM25 + Pinecone) de las pre-entregas 3 y 4. |
-| `trazas.py`, `main.py` | Runner que reconstruye la traza de delegación; CLI. |
-| `demo.ipynb`, `trazas/` | Demo del flujo de delegación (salidas de una corrida real). |
-| `tests/` | 28 tests offline (LLM guionado): herramientas, flujo completo, refinamiento, aislamiento de contexto, supervisor infinito, guardas. |
-
-## Cómo correrlo
-
-Requiere **Python 3.12+**.
+Requisitos: Python 3.12+, Docker (para Redis Stack y Phoenix) y una API key de LLM.
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate            # Linux/macOS: source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env              # y completar GEMINI_API_KEY (u OPENAI_API_KEY)
+cp .env.example .env                                   # completar GEMINI_API_KEY (u OPENAI_API_KEY)
+
+docker compose up -d redis phoenix                     # Redis Stack :6379 · Phoenix :6006
+uvicorn app.main:app --port 8000
 ```
 
-> Las API keys viven **solo** en `.env`, que está en `.gitignore`. Nunca se suben.
-> Para usar la búsqueda híbrida, agregá `PINECONE_API_KEY` (e `INDEX_NAME`) al `.env`: el índice es
-> el de la pre-entrega 4. Sin eso, el investigador usa solo BM25 local sobre `data/`.
+> El checkpointer necesita **Redis Stack** (RediSearch + RedisJSON); un Redis "pelado" no sirve.
+> `docker compose up -d --build` levanta además la API en un contenedor.
+
+Uso manual:
 
 ```bash
-python main.py demo                       # la consulta de la consigna; guarda trazas/traza_demo.{json,log}
-python main.py preguntar "¿Cuánto cuesta el late check-out pasadas las 13:00?"
-python main.py diagrama                   # regenera docs/grafo.mmd y docs/grafo.png
+curl -X POST localhost:8000/tasks -H 'content-type: application/json' \
+  -d '{"pregunta": "¿Cuánto pago de penalidad si cancelo 4 noches a USD 150 en temporada alta, 3 días antes?"}'
+# → {"job_id": "…", "status": "PENDING"}
+curl localhost:8000/tasks/<job_id>                     # polling: RUNNING → DONE (respuesta, pasos, contribuciones)
+
+# Tarea crítica: queda en AWAITING_APPROVAL hasta que un humano responde
+curl -X POST localhost:8000/tasks -H 'content-type: application/json' \
+  -d '{"pregunta": "Cancelá la reserva BS-10482 (4 noches a USD 150, temporada alta, 3 días antes) y cobrá la penalidad."}'
+curl -X POST localhost:8000/tasks/<job_id>/approve -H 'content-type: application/json' \
+  -d '{"aprobado": true, "comentario": "ok recepción"}'
 ```
 
-Tests (no necesitan red ni keys):
+Documentación interactiva en `http://localhost:8000/docs`.
+
+## Prueba de carga: 5 peticiones concurrentes
+
+```bash
+python scripts/carga.py            # 5 peticiones simultáneas, polling hasta DONE/FAILED
+python scripts/carga.py --aprobar  # idem, aprobando solas las que pidan aprobación humana
+```
+
+Imprime, por petición, cuánto tardó el `POST` en responder (milisegundos: no espera al agente) y el
+tiempo total, más la mediana y el p95 **vistos por el cliente**. El `WORKER_CONCURRENCIA` (5 por
+defecto) define cuántas corren a la vez; si el proveedor tiene cuota baja (free tier de Gemini) bajalo
+y usá `LLM_RPM`.
+
+### Evidencia (carpeta [screenshots/](screenshots/))
+
+Con la corrida terminada, abrí Phoenix en `http://localhost:6006` → proyecto `orquestador-hotel` y
+capturá:
+
+1. **Trazas**: lista de traces y el detalle de una (un span por nodo: supervisor → investigador →
+   analista → … → síntesis, con las llamadas al LLM y las tools).
+2. **Costo por ejecución**: columna *Cost* de la lista de traces (Phoenix la calcula a partir de los
+   tokens de entrada y salida y la tabla de precios del modelo).
+3. **Latencia p95**: panel de resumen del proyecto (*Latency P95*).
+4. Para la lectura del dashboard: ordená los spans por *Latency* y por *Total tokens* para ver qué
+   nodo concentra la latencia y los tokens (típicamente el investigador, por el contexto recuperado,
+   y el supervisor, que se invoca en cada vuelta).
+
+Cada traza lleva `job_id` y `session_id = job_id` en la metadata: filtrando por ese valor ves todo lo
+que hizo una tarea, incluso si se pausó por aprobación.
+
+**LangSmith en vez de Phoenix**: en `.env` poné `OBSERVABILITY=langsmith`, `LANGSMITH_API_KEY=…`; no hace
+falta tocar código.
+
+## Variables de entorno
+
+Ver [.env.example](.env.example): `REDIS_URL`, `WORKER_CONCURRENCIA`, `JOB_TIMEOUT_S`,
+`OBSERVABILITY` (`phoenix|langsmith|none`), `PHOENIX_COLLECTOR_ENDPOINT`, claves del LLM, etc.
+
+## Tests
 
 ```bash
 pip install -r requirements-dev.txt
-pytest && ruff check . && mypy *.py agents tests
+pytest          # offline: LLM guionado + fakeredis + checkpointer en memoria
+ruff check . && mypy app tests scripts
 ```
 
-> **Free tier de Gemini:** una consulta completa son ~10 requests (supervisor ×3, síntesis y los
-> ciclos ReAct de cada especialista). Con `LLM_RPM=4` un rate limiter compartido espacia las
-> llamadas; si un modelo agota su cuota diaria, probá otro con `LLM_MODEL=gemini-3.5-flash-lite`.
+Cubren: encolado sin esperar al agente, pausa y reanudación HITL (aprobada y rechazada), doble
+aprobación (`409`), paso a `FAILED` ante una excepción del agente, y las guardas del supervisor.
+Los tests no necesitan Redis, Phoenix ni API keys.
 
-## Criterios de la consigna → dónde se cumplen
+## Estructura
 
-| Requisito | Dónde |
-|---|---|
-| Topología jerárquica con nodo Supervisor | `graph.py`, `agents/supervisor.py` |
-| ≥ 2 especialistas con tools funcionales | `agents/research_agent.py` (DB del hotel), `agents/analyst_agent.py` |
-| Estado compartido que rastrea quién aportó qué | `state.py`: `hallazgos` + `contribuciones` |
-| Supervisor decide si está completo o hay que refinar | `Decision` + rúbrica en `PROMPT_SUPERVISOR`; test `test_refinamiento_*` |
-| Aristas condicionales con `Literal` | `graph.enrutar` y `state.Siguiente` |
-| Validación antes del `END` | Rúbrica de 4 puntos (fuentes, completitud, cómputo, consistencia) |
-| Evitar el supervisor infinito / contaminación de contexto | Ver tabla de arriba; tests `test_supervisor_infinito_*` y `test_el_analista_recibe_la_consigna_y_los_datos_no_el_historial` |
+```
+app/
+  main.py            FastAPI: POST /tasks · GET /tasks/{id} · GET /health
+  worker.py          cola + consumidores; actualiza el estado en Redis (y FAILED ante excepciones)
+  jobs.py            JobStore sobre Redis (hash por job, TTL 24 h, transición atómica)
+  graph.py           orquestador del M6 + nodo de aprobación + checkpointer Redis
+  hitl.py            nodo `aprobacion` (interrupt) y POST /tasks/{id}/approve
+  observability.py   init de Phoenix/OpenInference o LangSmith + metadata por job
+  agents/            supervisor, investigador, analista (M6) y ejecutor (acciones críticas)
+  state.py llm.py config.py base_hotel.py data/
+scripts/carga.py     prueba de carga de 5 peticiones concurrentes
+screenshots/         capturas del dashboard
+docker-compose.yml   Redis Stack + Phoenix (+ la API, opcional) · Dockerfile
+```

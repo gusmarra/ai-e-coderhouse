@@ -10,17 +10,19 @@ from dotenv import load_dotenv
 __all__ = [
     "DATA_DIR",
     "EMBEDDING_DIMENSION",
+    "JOB_TIMEOUT_S",
     "MAX_PASOS",
     "MAX_REFINAMIENTOS",
     "RECURSION_LIMIT",
-    "TRAZAS_DIR",
+    "REDIS_URL",
+    "WORKER_CONCURRENCIA",
     "nombre_indice",
     "nombre_namespace",
 ]
 
-ROOT = Path(__file__).parent
-DATA_DIR = ROOT / "data"
-TRAZAS_DIR = ROOT / "trazas"
+PACKAGE_DIR = Path(__file__).parent
+ROOT = PACKAGE_DIR.parent
+DATA_DIR = PACKAGE_DIR / "data"
 
 load_dotenv(ROOT / ".env")
 
@@ -49,3 +51,10 @@ def nombre_indice() -> str:
 
 def nombre_namespace() -> str:
     return os.getenv("PINECONE_NAMESPACE") or _INDICE_POR_DEFECTO
+
+#: Infraestructura de la API (pre-entrega 7).
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+#: Tareas en paralelo que atiende el worker; el resto espera en la cola. Con el free tier de un LLM, bajo.
+WORKER_CONCURRENCIA = int(os.getenv("WORKER_CONCURRENCIA", "5"))
+#: Tope de tiempo por ejecucion: si el LLM se cuelga, el job pasa a FAILED en vez de quedar RUNNING para siempre.
+JOB_TIMEOUT_S = float(os.getenv("JOB_TIMEOUT_S", "300"))

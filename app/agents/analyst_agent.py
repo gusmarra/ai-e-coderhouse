@@ -19,8 +19,8 @@ from typing import Any
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, tool
 
-from agents.common import NodoEspecialista, crear_nodo_especialista
-from state import EstadoOrquestador
+from app.agents.common import NodoEspecialista, crear_nodo_especialista
+from app.state import EstadoOrquestador
 
 __all__ = [
     "HERRAMIENTAS_ANALISTA",

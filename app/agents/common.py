@@ -23,7 +23,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 from langgraph.prebuilt import create_react_agent
 
-from state import Agente, Contribucion, EstadoOrquestador, Hallazgo
+from app.state import Agente, Contribucion, EstadoOrquestador, Hallazgo
 
 __all__ = ["NodoEspecialista", "crear_nodo_especialista"]
 

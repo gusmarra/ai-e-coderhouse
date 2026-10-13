@@ -1,0 +1,28 @@
+# Infraestructura local: `docker compose up -d redis phoenix` y la API corre en el host (uvicorn).
+# `docker compose up -d --build` levanta tambien la API en un contenedor.
+services:
+  redis:
+    # Redis Stack: trae RediSearch + RedisJSON, que necesita el checkpointer de LangGraph.
+    image: redis/redis-stack-server:latest
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006" # dashboard + colector OTLP/HTTP
+      - "4317:4317" # colector OTLP/gRPC
+
+  api:
+    build: .
+    ports: ["8000:8000"]
+    env_file: [.env]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+    depends_on:
+      redis: { condition: service_healthy }
+      phoenix: { condition: service_started }

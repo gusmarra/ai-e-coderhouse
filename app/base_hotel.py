@@ -35,7 +35,7 @@ with warnings.catch_warnings():  # langchain-community avisa que esta en "sunset
     from langchain_community.retrievers import BM25Retriever
 from langchain_classic.retrievers import EnsembleRetriever
 
-from config import DATA_DIR, nombre_indice, nombre_namespace
+from app.config import DATA_DIR, nombre_indice, nombre_namespace
 
 __all__ = [
     "BuscadorHotel",
@@ -179,7 +179,7 @@ def _vectorial_desde_entorno() -> BaseRetriever | None:
     try:
         from pinecone import Pinecone
 
-        from llm import crear_embeddings
+        from app.llm import crear_embeddings
 
         pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
         if not pc.has_index(nombre_indice()):

@@ -14,9 +14,9 @@ from __future__ import annotations
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, tool
 
-from agents.common import NodoEspecialista, crear_nodo_especialista
-from base_hotel import BuscadorHotel, buscador_por_defecto
-from state import EstadoOrquestador
+from app.agents.common import NodoEspecialista, crear_nodo_especialista
+from app.base_hotel import BuscadorHotel, buscador_por_defecto
+from app.state import EstadoOrquestador
 
 __all__ = ["PROMPT_INVESTIGADOR", "crear_herramientas_investigador", "crear_investigador"]
 

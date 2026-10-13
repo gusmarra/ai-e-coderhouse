@@ -1,4 +1,4 @@
-# Grafo, create_react_agent, Command y MessagesState.
+# Orquestador multi-agente (modulo 6): grafo, agentes ReAct, salida estructurada.
 langgraph>=1.0
 langchain-core>=1.0
 pydantic>=2.9,<3
@@ -15,3 +15,17 @@ pinecone>=7.0
 # LLM: alcanza con uno. Gemini es el de por defecto (.env.example).
 langchain-google-genai>=4
 # langchain-openai>=1
+
+# API (modulo 7): FastAPI + Redis (estado de jobs y checkpoints de LangGraph).
+fastapi>=0.115
+uvicorn[standard]>=0.30
+redis>=5.0
+langgraph-checkpoint-redis>=0.1
+
+# Observabilidad: Arize Phoenix via OpenInference (o LangSmith, que no necesita paquetes extra).
+arize-phoenix-otel>=0.9
+openinference-instrumentation-langchain>=0.1.50
+langsmith>=0.3
+
+# Script de prueba de carga
+httpx>=0.27

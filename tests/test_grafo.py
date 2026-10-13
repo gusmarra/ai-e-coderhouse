@@ -4,12 +4,12 @@ import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from agents.supervisor import aplicar_guardas
-from base_hotel import BuscadorHotel, cargar_chunks
-from config import MAX_PASOS
-from graph import construir_grafo, enrutar, estado_inicial
+from app.agents.supervisor import aplicar_guardas
+from app.base_hotel import BuscadorHotel, cargar_chunks
+from app.config import MAX_PASOS
+from app.graph import construir_grafo, enrutar, estado_inicial
 from tests.fakes import ModeloGuionado, decision, llamada
-from trazas import ejecutar
+from tests.trazas import ejecutar
 
 PREGUNTA = "4 noches a USD 150, temporada alta, cancela 3 dias antes: ¿penalidad?"
 LIMITE: RunnableConfig = {"recursion_limit": 25}
@@ -161,3 +161,22 @@ def test_el_diagrama_refleja_la_topologia() -> None:
     mermaid = construir_grafo(_supervisor(decision("FINISH"))).get_graph().draw_mermaid()
     for nodo in ("supervisor", "investigador", "analista", "sintesis"):
         assert nodo in mermaid
+
+
+def test_toda_accion_del_ejecutor_pasa_por_la_aprobacion_humana() -> None:
+    assert enrutar({"next_agent": "ejecutor"}) == "aprobacion"  # type: ignore[typeddict-item]
+
+
+def test_el_diagrama_incluye_el_nodo_hitl_y_el_ejecutor() -> None:
+    mermaid = construir_grafo(_supervisor(decision("FINISH"))).get_graph().draw_mermaid()
+    assert "aprobacion" in mermaid
+    assert "ejecutor" in mermaid
+
+
+def test_guarda_el_ejecutor_no_corre_dos_veces() -> None:
+    hallazgo = {"contenido": "x", "fuentes": [], "version": 1}
+    estado = estado_inicial(PREGUNTA) | {
+        "hallazgos": {"investigador": hallazgo},
+        "contribuciones": [{"paso": 2, "agente": "ejecutor", "instruccion": "", "resumen": "", "herramientas": []}],
+    }
+    assert aplicar_guardas(decision("ejecutor", "otra vez"), estado).siguiente == "FINISH"  # type: ignore[arg-type]

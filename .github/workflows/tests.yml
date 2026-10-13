@@ -20,5 +20,5 @@ jobs:
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
-      - run: mypy *.py agents tests
+      - run: mypy app tests scripts
       - run: pytest

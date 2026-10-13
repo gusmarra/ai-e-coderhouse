@@ -31,12 +31,12 @@ __all__ = [
 ]
 
 #: Nombres de los especialistas = nombres de los nodos del grafo.
-Agente = Literal["investigador", "analista"]
-AGENTES: tuple[Agente, ...] = ("investigador", "analista")
+Agente = Literal["investigador", "analista", "ejecutor"]
+AGENTES: tuple[Agente, ...] = ("investigador", "analista", "ejecutor")
 
 #: Lo que puede decidir el supervisor: un especialista o cerrar (ir a sintesis).
 FINISH: Literal["FINISH"] = "FINISH"
-Siguiente = Literal["investigador", "analista", "FINISH"]
+Siguiente = Literal["investigador", "analista", "ejecutor", "FINISH"]
 
 
 class Hallazgo(TypedDict):
@@ -86,5 +86,7 @@ class EstadoOrquestador(MessagesState):
     pasos: int
     #: True cuando el supervisor valido el resultado contra su rubrica y puede cerrar.
     task_completed: bool
+    #: Resultado de la aprobacion humana de la accion critica: True/False (None si no hubo pedido).
+    aprobado: bool | None
     #: Respuesta final redactada por el nodo de sintesis.
     respuesta_final: str

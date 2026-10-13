@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from agents.analyst_agent import analizar_sentimiento, calcular, evaluar_expresion, extraer_cifras
-from agents.research_agent import crear_herramientas_investigador
-from base_hotel import BuscadorHotel, cargar_chunks, tokenizar
+from app.agents.analyst_agent import analizar_sentimiento, calcular, evaluar_expresion, extraer_cifras
+from app.agents.research_agent import crear_herramientas_investigador
+from app.base_hotel import BuscadorHotel, cargar_chunks, tokenizar
 
 
 @pytest.fixture(scope="module")

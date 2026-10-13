@@ -11,7 +11,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.rate_limiters import InMemoryRateLimiter
 
-from config import EMBEDDING_DIMENSION
+from app.config import EMBEDDING_DIMENSION
 
 __all__ = ["crear_embeddings", "crear_modelo"]
 

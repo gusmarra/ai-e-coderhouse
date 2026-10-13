@@ -1,0 +1,2 @@
+Capturas del dashboard (Phoenix / LangSmith) de la corrida de 5 peticiones concurrentes.
+Ver "Evidencia" en el README para el listado de capturas esperadas.

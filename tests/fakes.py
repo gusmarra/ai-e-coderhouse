@@ -12,7 +12,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable, RunnableLambda
 from pydantic import Field
 
-from agents.supervisor import Decision
+from app.agents.supervisor import Decision
 
 
 def llamada(herramienta: str, id_: str, /, **args: Any) -> AIMessage:

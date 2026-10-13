@@ -1,7 +1,7 @@
 [project]
-name = "orquestador-multiagente-langgraph"
-version = "1.0.0"
-description = "Orquestador multi-agente jerarquico (Supervisor + Investigador + Analista) con LangGraph sobre la base del Hotel Bahia Serena"
+name = "api-orquestador-multiagente"
+version = "2.0.0"
+description = "API FastAPI asincrona sobre un orquestador multi-agente LangGraph: Redis, Phoenix o LangSmith y aprobacion humana"
 requires-python = ">=3.12"
 
 [tool.pytest.ini_options]

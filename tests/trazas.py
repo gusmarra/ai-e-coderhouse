@@ -11,8 +11,8 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 
-from config import RECURSION_LIMIT
-from graph import estado_inicial
+from app.config import RECURSION_LIMIT
+from app.graph import estado_inicial
 
 __all__ = ["Evento", "Traza", "ejecutar", "formatear_evento", "guardar"]
 
